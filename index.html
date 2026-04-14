@@ -35,27 +35,36 @@ function rndInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
 function lerp(a, b, t){ return a + (b - a) * t; }
 
 // ─── Game state ───────────────────────────────────────────────────────────────
-// 'idle'     – ice resting on counter
-// 'held'     – ice following mouse
-// 'cracking' – brief pause/animation before shards appear
-// 'cracked'  – shards sliding
-// 'spawning' – counting down before new cube appears
+// 'idle'          – ice resting on counter
+// 'held'          – ice following mouse
+// 'falling'       – ice falling with gravity after release
+// 'cracked'       – shards sliding
+// 'melting'       – shards shrinking, puddle growing
+// 'puddle_fading' – puddle fading out
+// 'spawning'      – new ice cube fading in
 let state = 'idle';
 
 // Ice cube
-let ice = null;          // { x, y, vx, cracks[], alpha }
+let ice = null;          // { x, y, vx, vy, cracks[], alpha }
 function mkIce() {
-  return { x: W / 2, y: counterY - ICE_H / 2, vx: 0, cracks: [], alpha: 1 };
+  return { x: W / 2, y: counterY - ICE_H / 2, vx: 0, vy: 0, cracks: [], alpha: 1 };
 }
 function resetIcePos() { if (ice) { ice.x = W / 2; ice.y = counterY - ICE_H / 2; } }
 
 // Shards  — poly stored as LOCAL (relative to x,y) coords
 let shards = [];
-// { x, y, vx, vy, poly:[[rx,ry]…], alpha, airborne, airVy, bounced, falling, fallVy }
+// { x, y, vx, vy, poly:[[rx,ry]…], alpha, scale, airborne, airVy, bounced, falling, fallVy }
+
+// Melt sequence
+let meltTimer   = 0;
+const MELT_FRAMES   = 120;   // 2 seconds at 60 fps
+let puddleTimer = 0;
+const PUDDLE_FRAMES = 90;    // 1.5 seconds at 60 fps
+let puddleData  = null;      // { x, y, rx, ry, alpha }
 
 // Spawning
 let spawnTimer = 0;
-const SPAWN_FRAMES = 60;
+const SPAWN_FRAMES = 60;     // 1 second at 60 fps
 
 // Mouse / drag
 const mouse = { x: 0, y: 0, down: false };
@@ -118,30 +127,43 @@ function hitPoly(lx, ly, poly) {
 
 // ─── Drop / crack logic ───────────────────────────────────────────────────────
 function releaseDrop() {
-  const releaseY = ice.y;
-  const restY    = counterY - ICE_H / 2;
-  const dropDist = restY - releaseY;   // positive = dropped from above
-  const ratio    = dropDist / H;
-
-  if (ratio < 0.04) {
+  const restY = counterY - ICE_H / 2;
+  if (ice.y >= restY - 10) {
     // Barely lifted — just settle
     ice.y  = restY;
     ice.vx = 0;
+    ice.vy = 0;
     state  = 'idle';
     return;
   }
+  // Start falling with zero downward velocity; gravity takes over
+  ice.vy = 0;
+  state  = 'falling';
+}
 
-  const impactX = ice.x;
-  if (ratio < 0.15) {
-    shortCrack(impactX, restY);
-  } else if (ratio < 0.40) {
-    mediumCrack(impactX, restY, ratio);
+// Called when falling ice hits the countertop — impact velocity determines crack type
+function impactCrack(impactVy) {
+  const cx = ice.x;
+  const cy = counterY - ICE_H / 2;
+
+  if (impactVy < 6) {
+    // Slow impact — settle
+    ice.y  = cy;
+    ice.vx = 0;
+    ice.vy = 0;
+    state  = 'idle';
+    return;
+  }
+  if (impactVy < 12) {
+    shortCrack(cx, cy);
+  } else if (impactVy < 20) {
+    mediumCrack(cx, cy);
   } else {
-    highCrack(impactX, restY, ratio);
+    highCrack(cx, cy);
   }
 }
 
-// Short drop — cracks on the cube, stays whole
+// Short drop — surface cracks appear, cube stays whole
 function shortCrack(cx, cy) {
   const count = rndInt(4, 6);
   const lines  = [];
@@ -158,6 +180,7 @@ function shortCrack(cx, cy) {
   ice.cracks = lines;   // local to ice center
   ice.y  = cy;
   ice.vx = 0;
+  ice.vy = 0;
   state  = 'idle';
 }
 
@@ -202,10 +225,10 @@ function genShards(cx, cy, count, spread) {
     // Poly in LOCAL coords (relative to shard center)
     const localPoly = clipped.map(([px, py]) => [px - scx, py - scy]);
 
-    // Outward velocity
+    // Outward velocity + tiny random horizontal spread on impact
     const dist  = Math.sqrt(scx * scx + scy * scy) || 1;
     const speed = rnd(0.4, 2.0) * spread;
-    const vx    = (scx / dist) * speed + rnd(-0.2, 0.2);
+    const vx    = (scx / dist) * speed + rnd(-1.0, 1.0);
     const airVy = spread > 1.5 ? rnd(-4, -1.5) : 0;  // upward pop for high drops
 
     result.push({
@@ -213,6 +236,7 @@ function genShards(cx, cy, count, spread) {
       vx, vy: 0,
       poly: localPoly,
       alpha: 1,
+      scale: 1,
       airborne: airVy !== 0,
       airVy,
       bounced: false,
@@ -223,13 +247,13 @@ function genShards(cx, cy, count, spread) {
   return result;
 }
 
-function mediumCrack(cx, cy, ratio) {
+function mediumCrack(cx, cy) {
   shards = genShards(cx, cy, rndInt(4, 6), 1.0);
   ice    = null;
   state  = 'cracked';
 }
 
-function highCrack(cx, cy, ratio) {
+function highCrack(cx, cy) {
   shards = genShards(cx, cy, rndInt(8, 14), 2.5);
   ice    = null;
   state  = 'cracked';
@@ -289,6 +313,20 @@ function update() {
     }
   }
 
+  // ── falling ──
+  if (state === 'falling' && ice) {
+    ice.vy += 0.6;   // gravity = 0.6px per frame squared
+    ice.x  += ice.vx;
+    ice.y  += ice.vy;
+    ice.vx *= 0.99;
+
+    const restY = counterY - ICE_H / 2;
+    if (ice.y >= restY) {
+      ice.y = restY;
+      impactCrack(ice.vy);
+    }
+  }
+
   // ── cracked ──
   if (state === 'cracked') {
     // Drag a shard
@@ -328,19 +366,20 @@ function update() {
 
         const floor = counterY - 10; // approximate shard half-height
         if (s.y >= floor) {
-          s.y      = floor;
+          s.y        = floor;
           s.airborne = false;
-          s.airVy  = 0;
-          // horizontal friction after bounce
-          s.vx    *= 0.6;
+          s.airVy    = 0;
+          // horizontal friction after bounce + random spread on landing
+          s.vx      *= 0.6;
+          s.vx      += rnd(-1.0, 1.0);
         }
         // Check edge fall
         if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
         continue;
       }
 
-      // Sliding on counter
-      s.vx *= 0.92;
+      // Sliding on counter — reduced friction (wet ice on smooth marble)
+      s.vx *= 0.985;
       s.x  += s.vx;
       s.y   = counterY - 10;   // keep on counter
 
@@ -348,9 +387,64 @@ function update() {
       if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
     }
 
+    // Check if all grounded shards have stopped — trigger melt sequence
+    const groundedShards = shards.filter(s => !s.falling);
+    if (groundedShards.length > 0 &&
+        groundedShards.every(s => !s.airborne && Math.abs(s.vx) < 0.15)) {
+      // Compute puddle centroid from stopped shards
+      let px = 0, py = 0;
+      for (const s of groundedShards) { px += s.x; py += s.y; }
+      px /= groundedShards.length;
+      py /= groundedShards.length;
+      const spreadX = Math.max(...groundedShards.map(s => s.x)) - Math.min(...groundedShards.map(s => s.x));
+      // Keep only grounded shards for melt animation
+      shards     = groundedShards.slice();
+      puddleData = { x: px, y: py + 10, rx: Math.max(40, spreadX * 0.35 + 30), ry: 14, alpha: 0 };
+      meltTimer  = 0;
+      state      = 'melting';
+    }
+
+    // All shards fell off the edge — skip melt, go straight to spawn
     if (shards.length === 0) {
-      state      = 'spawning';
       spawnTimer = 0;
+      state      = 'spawning';
+    }
+  }
+
+  // ── melting ──
+  if (state === 'melting') {
+    meltTimer++;
+    const t = meltTimer / MELT_FRAMES;
+
+    // Shrink shards toward zero
+    for (const s of shards) {
+      s.scale = 1 - t;
+    }
+
+    // Grow puddle and fade it in quickly
+    if (puddleData) {
+      puddleData.alpha = Math.min(0.55, t * 2 * 0.55);
+      puddleData.rx   += 0.15;
+      puddleData.ry   += 0.04;
+    }
+
+    if (meltTimer >= MELT_FRAMES) {
+      shards      = [];
+      puddleTimer = 0;
+      state       = 'puddle_fading';
+    }
+  }
+
+  // ── puddle fading ──
+  if (state === 'puddle_fading') {
+    puddleTimer++;
+    if (puddleData) {
+      puddleData.alpha = 0.55 * (1 - puddleTimer / PUDDLE_FRAMES);
+    }
+    if (puddleTimer >= PUDDLE_FRAMES) {
+      puddleData = null;
+      spawnTimer = 0;
+      state      = 'spawning';
     }
   }
 
@@ -495,6 +589,9 @@ function drawShard(s) {
   ctx.save();
   ctx.globalAlpha = s.alpha;
   ctx.translate(s.x, s.y);
+  if (s.scale !== undefined && s.scale < 1) {
+    ctx.scale(s.scale, s.scale);
+  }
 
   // Shadow (only when near counter)
   if (!s.falling && !s.airborne) {
@@ -526,17 +623,32 @@ function drawShard(s) {
   ctx.restore();
 }
 
+function drawPuddle(pd) {
+  if (!pd || pd.alpha <= 0) return;
+  ctx.save();
+  // Main puddle ellipse
+  ctx.globalAlpha = pd.alpha;
+  ctx.fillStyle = 'rgba(20, 35, 60, 0.8)';
+  ctx.beginPath();
+  ctx.ellipse(pd.x, pd.y, pd.rx, pd.ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Wet sheen highlight
+  ctx.globalAlpha = pd.alpha * 0.4;
+  ctx.fillStyle = 'rgba(80, 130, 190, 0.5)';
+  ctx.beginPath();
+  ctx.ellipse(pd.x - pd.rx * 0.15, pd.y - pd.ry * 0.2, pd.rx * 0.5, pd.ry * 0.45, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawSpawning() {
   const t = spawnTimer / SPAWN_FRAMES;
-  ctx.save();
-  // Draw the ice in its rest position with fading alpha
   const fakeIce = {
     x: W / 2,
     y: counterY - ICE_H / 2,
     cracks: [],
     alpha: t
   };
-  ctx.restore();
   drawIce(fakeIce);
 }
 
@@ -579,11 +691,18 @@ function frame() {
   drawBackground();
   drawCounter();
 
-  if ((state === 'idle' || state === 'held') && ice) {
+  if ((state === 'idle' || state === 'held' || state === 'falling') && ice) {
     drawIce(ice);
   }
   if (state === 'cracked') {
     for (const s of shards) drawShard(s);
+  }
+  if (state === 'melting') {
+    drawPuddle(puddleData);
+    for (const s of shards) drawShard(s);
+  }
+  if (state === 'puddle_fading') {
+    drawPuddle(puddleData);
   }
   if (state === 'spawning') {
     drawSpawning();
