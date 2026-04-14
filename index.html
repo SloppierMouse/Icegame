@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ice Cracking Game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #05080f; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ─── Dimensions ──────────────────────────────────────────────────────────────
+let W, H, counterY;
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  counterY = H * 0.8;
+}
+resize();
+window.addEventListener('resize', () => { resize(); if (state === 'idle' && ice) resetIcePos(); });
+
+const ICE_W = 120, ICE_H = 120;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function rnd(a, b)    { return a + Math.random() * (b - a); }
+function rndInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+function lerp(a, b, t){ return a + (b - a) * t; }
+
+// ─── Game state ───────────────────────────────────────────────────────────────
+// 'idle'     – ice resting on counter
+// 'held'     – ice following mouse
+// 'cracking' – brief pause/animation before shards appear
+// 'cracked'  – shards sliding
+// 'spawning' – counting down before new cube appears
+let state = 'idle';
+
+// Ice cube
+let ice = null;          // { x, y, vx, cracks[], alpha }
+function mkIce() {
+  return { x: W / 2, y: counterY - ICE_H / 2, vx: 0, cracks: [], alpha: 1 };
+}
+function resetIcePos() { if (ice) { ice.x = W / 2; ice.y = counterY - ICE_H / 2; } }
+
+// Shards  — poly stored as LOCAL (relative to x,y) coords
+let shards = [];
+// { x, y, vx, vy, poly:[[rx,ry]…], alpha, airborne, airVy, bounced, falling, fallVy }
+
+// Spawning
+let spawnTimer = 0;
+const SPAWN_FRAMES = 60;
+
+// Mouse / drag
+const mouse = { x: 0, y: 0, down: false };
+// drag = null | { type:'ice' } | { type:'shard', idx, offX, offY }
+let drag = null;
+let heldOffX = 0, heldOffY = 0;
+
+// For velocity estimation on release
+let prevMouseX = 0, prevMouseY = 0;
+
+canvas.addEventListener('mousemove', e => {
+  prevMouseX = mouse.x; prevMouseY = mouse.y;
+  mouse.x = e.clientX; mouse.y = e.clientY;
+});
+
+canvas.addEventListener('mousedown', e => {
+  mouse.down = true;
+  if (state === 'idle' && ice && hitBox(mouse.x, mouse.y, ice.x, ice.y, ICE_W, ICE_H)) {
+    heldOffX = mouse.x - ice.x;
+    heldOffY = mouse.y - ice.y;
+    drag = { type: 'ice' };
+    state = 'held';
+    canvas.style.cursor = 'grabbing';
+  } else if (state === 'cracked') {
+    for (let i = 0; i < shards.length; i++) {
+      const s = shards[i];
+      if (!s.falling && hitPoly(mouse.x - s.x, mouse.y - s.y, s.poly)) {
+        drag = { type: 'shard', idx: i, offX: mouse.x - s.x, offY: mouse.y - s.y };
+        break;
+      }
+    }
+  }
+});
+
+canvas.addEventListener('mouseup', () => {
+  mouse.down = false;
+  if (state === 'held' && drag && drag.type === 'ice') {
+    releaseDrop();
+  }
+  drag = null;
+  canvas.style.cursor = 'default';
+});
+
+// ─── Hit testing ──────────────────────────────────────────────────────────────
+function hitBox(mx, my, cx, cy, w, h) {
+  return mx >= cx - w/2 && mx <= cx + w/2 && my >= cy - h/2 && my <= cy + h/2;
+}
+
+// lx, ly are already in local (shard-relative) space
+function hitPoly(lx, ly, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > ly) !== (yj > ly) && lx < (xj - xi) * (ly - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// ─── Drop / crack logic ───────────────────────────────────────────────────────
+function releaseDrop() {
+  const releaseY = ice.y;
+  const restY    = counterY - ICE_H / 2;
+  const dropDist = restY - releaseY;   // positive = dropped from above
+  const ratio    = dropDist / H;
+
+  if (ratio < 0.04) {
+    // Barely lifted — just settle
+    ice.y  = restY;
+    ice.vx = 0;
+    state  = 'idle';
+    return;
+  }
+
+  const impactX = ice.x;
+  if (ratio < 0.15) {
+    shortCrack(impactX, restY);
+  } else if (ratio < 0.40) {
+    mediumCrack(impactX, restY, ratio);
+  } else {
+    highCrack(impactX, restY, ratio);
+  }
+}
+
+// Short drop — cracks on the cube, stays whole
+function shortCrack(cx, cy) {
+  const count = rndInt(4, 6);
+  const lines  = [];
+  for (let i = 0; i < count; i++) {
+    const angle = rnd(0, Math.PI * 2);
+    const len   = rnd(15, 50);
+    lines.push([
+      Math.cos(angle) * 4,
+      Math.sin(angle) * 4,
+      Math.cos(angle) * len,
+      Math.sin(angle) * len
+    ]);
+  }
+  ice.cracks = lines;   // local to ice center
+  ice.y  = cy;
+  ice.vx = 0;
+  state  = 'idle';
+}
+
+// Generate polygonal shards from an ice rect centred at (cx, cy)
+// Returns array of shard objects
+function genShards(cx, cy, count, spread) {
+  const hw = ICE_W / 2, hh = ICE_H / 2;
+
+  // Random angles for radial slicing
+  const angles = [];
+  for (let i = 0; i < count; i++) angles.push(rnd(0, Math.PI * 2));
+  angles.sort((a, b) => a - b);
+
+  const R = Math.sqrt(hw * hw + hh * hh) * 1.5;   // large enough to cover corners
+  const result = [];
+
+  for (let i = 0; i < count; i++) {
+    const a0 = angles[i];
+    const a1 = angles[(i + 1) % count];
+    const amid = (a0 + a1) / 2;
+
+    // Sector polygon (world space, centred at cx,cy temporarily)
+    const sector = [
+      [0, 0],
+      [Math.cos(a0)   * R, Math.sin(a0)   * R],
+      [Math.cos(amid) * R, Math.sin(amid) * R],
+      [Math.cos(a1)   * R, Math.sin(a1)   * R]
+    ];
+
+    // Clip to ice rect (in local space, so rect is [-hw,hw] x [-hh,hh])
+    const clipped = clipToRect(sector, -hw, -hh, hw, hh);
+    if (!clipped || clipped.length < 3) continue;
+
+    // Centroid of clipped shard (local to ice)
+    let scx = 0, scy = 0;
+    for (const [px, py] of clipped) { scx += px; scy += py; }
+    scx /= clipped.length; scy /= clipped.length;
+
+    // World position of shard center
+    const wx = cx + scx, wy = cy + scy;
+
+    // Poly in LOCAL coords (relative to shard center)
+    const localPoly = clipped.map(([px, py]) => [px - scx, py - scy]);
+
+    // Outward velocity
+    const dist  = Math.sqrt(scx * scx + scy * scy) || 1;
+    const speed = rnd(0.4, 2.0) * spread;
+    const vx    = (scx / dist) * speed + rnd(-0.2, 0.2);
+    const airVy = spread > 1.5 ? rnd(-4, -1.5) : 0;  // upward pop for high drops
+
+    result.push({
+      x: wx, y: wy,
+      vx, vy: 0,
+      poly: localPoly,
+      alpha: 1,
+      airborne: airVy !== 0,
+      airVy,
+      bounced: false,
+      falling: false,
+      fallVy: 0
+    });
+  }
+  return result;
+}
+
+function mediumCrack(cx, cy, ratio) {
+  shards = genShards(cx, cy, rndInt(4, 6), 1.0);
+  ice    = null;
+  state  = 'cracked';
+}
+
+function highCrack(cx, cy, ratio) {
+  shards = genShards(cx, cy, rndInt(8, 14), 2.5);
+  ice    = null;
+  state  = 'cracked';
+}
+
+// ─── Sutherland-Hodgman clipping ──────────────────────────────────────────────
+function clipToRect(poly, x0, y0, x1, y1) {
+  const edges = [
+    { inside: p => p[0] >= x0, isect: (a, b) => { const t=(x0-a[0])/(b[0]-a[0]); return [x0, a[1]+t*(b[1]-a[1])]; } },
+    { inside: p => p[0] <= x1, isect: (a, b) => { const t=(x1-a[0])/(b[0]-a[0]); return [x1, a[1]+t*(b[1]-a[1])]; } },
+    { inside: p => p[1] >= y0, isect: (a, b) => { const t=(y0-a[1])/(b[1]-a[1]); return [a[0]+t*(b[0]-a[0]), y0]; } },
+    { inside: p => p[1] <= y1, isect: (a, b) => { const t=(y1-a[1])/(b[1]-a[1]); return [a[0]+t*(b[0]-a[0]), y1]; } }
+  ];
+  let out = poly.slice();
+  for (const edge of edges) {
+    if (!out.length) return [];
+    const inp = out; out = [];
+    for (let i = 0; i < inp.length; i++) {
+      const cur  = inp[i];
+      const prev = inp[(i + inp.length - 1) % inp.length];
+      const cIn  = edge.inside(cur);
+      const pIn  = edge.inside(prev);
+      if (cIn) { if (!pIn) out.push(edge.isect(prev, cur)); out.push(cur); }
+      else if (pIn) out.push(edge.isect(prev, cur));
+    }
+  }
+  return out;
+}
+
+// ─── Update ───────────────────────────────────────────────────────────────────
+function update() {
+  // ── idle ──
+  if (state === 'idle') {
+    if (!ice) { ice = mkIce(); }
+    if (!drag) {
+      ice.vx *= 0.88;
+      ice.x  += ice.vx;
+      ice.x   = Math.max(ICE_W / 2, Math.min(W - ICE_W / 2, ice.x));
+      ice.y   = counterY - ICE_H / 2;
+    }
+  }
+
+  // ── held ──
+  if (state === 'held' && ice) {
+    const targetX = mouse.x - heldOffX;
+    const targetY = mouse.y - heldOffY;
+    const onCounter = ice.y >= counterY - ICE_H / 2 - 2;
+
+    if (onCounter && targetY > counterY - ICE_H / 2 - 15) {
+      // Slide on counter before lift
+      const slideX = Math.max(ICE_W / 2, Math.min(W - ICE_W / 2, targetX));
+      ice.x += (slideX - ice.x) * 0.22;
+      ice.y  = counterY - ICE_H / 2;
+    } else {
+      ice.x += (targetX - ice.x) * 0.15;
+      ice.y += (targetY - ice.y) * 0.15;
+    }
+  }
+
+  // ── cracked ──
+  if (state === 'cracked') {
+    // Drag a shard
+    if (drag && drag.type === 'shard') {
+      const s = shards[drag.idx];
+      if (s && !s.falling) {
+        const tx = mouse.x - drag.offX;
+        const ty = mouse.y - drag.offY;
+        s.vx = tx - s.x;
+        s.vy = ty - s.y;
+        s.x  = tx;
+        s.y  = ty;
+      }
+    }
+
+    for (let i = shards.length - 1; i >= 0; i--) {
+      const s = shards[i];
+      if (drag && drag.type === 'shard' && drag.idx === i) continue;
+
+      if (s.falling) {
+        // Fall off edge
+        s.fallVy += 1.8;
+        s.x      += s.vx * 0.9;
+        s.y      += s.fallVy;
+        s.vx     *= 0.9;
+        s.alpha  -= 0.035;
+        if (s.alpha <= 0) { shards.splice(i, 1); }
+        continue;
+      }
+
+      if (s.airborne) {
+        // High-drop bounce arc
+        s.airVy += 0.55;   // gravity
+        s.x     += s.vx;
+        s.y     += s.airVy;
+        s.vx    *= 0.98;
+
+        const floor = counterY - 10; // approximate shard half-height
+        if (s.y >= floor) {
+          s.y      = floor;
+          s.airborne = false;
+          s.airVy  = 0;
+          // horizontal friction after bounce
+          s.vx    *= 0.6;
+        }
+        // Check edge fall
+        if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
+        continue;
+      }
+
+      // Sliding on counter
+      s.vx *= 0.92;
+      s.x  += s.vx;
+      s.y   = counterY - 10;   // keep on counter
+
+      // Edge fall-off
+      if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
+    }
+
+    if (shards.length === 0) {
+      state      = 'spawning';
+      spawnTimer = 0;
+    }
+  }
+
+  // ── spawning ──
+  if (state === 'spawning') {
+    spawnTimer++;
+    if (spawnTimer >= SPAWN_FRAMES) {
+      ice   = mkIce();
+      state = 'idle';
+    }
+  }
+}
+
+// ─── Draw helpers ─────────────────────────────────────────────────────────────
+
+// Static marble vein paths — computed once per resize
+let veinPaths = null;
+function buildVeinPaths() {
+  veinPaths = [];
+  const numVeins = 6;
+  for (let i = 0; i < numVeins; i++) {
+    // Deterministic-ish layout so they don't jump on redraw
+    const x0 = (i / numVeins) * W * 1.1 - W * 0.05;
+    const x1 = x0 + rnd(-W * 0.3, W * 0.4);
+    const x2 = x1 + rnd(W * 0.2, W * 0.5);
+    const y0 = counterY + rnd(5, 30);
+    const y1 = counterY + rnd(10, 60);
+    const y2 = counterY + rnd(5, 50);
+    veinPaths.push({ x0, y0, x1, y1, x2, y2, w: rnd(0.4, 1.8) });
+  }
+}
+buildVeinPaths();
+window.addEventListener('resize', () => { buildVeinPaths(); });
+
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0, 0, 0, counterY);
+  grad.addColorStop(0,   '#04060d');
+  grad.addColorStop(0.6, '#080d1a');
+  grad.addColorStop(1,   '#0c1323');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, counterY);
+}
+
+function drawCounter() {
+  // Marble base
+  const grad = ctx.createLinearGradient(0, counterY, 0, H);
+  grad.addColorStop(0,   '#d6d4cf');
+  grad.addColorStop(0.2, '#e4e2de');
+  grad.addColorStop(0.6, '#d0cecc');
+  grad.addColorStop(1,   '#b8b6b3');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, counterY, W, H - counterY);
+
+  // Veining
+  ctx.save();
+  ctx.globalAlpha = 0.15;
+  for (const v of veinPaths) {
+    ctx.beginPath();
+    ctx.moveTo(v.x0, v.y0);
+    ctx.quadraticCurveTo(v.x1, v.y1, v.x2, v.y2);
+    ctx.strokeStyle = '#777';
+    ctx.lineWidth   = v.w;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Top-edge highlight
+  const edge = ctx.createLinearGradient(0, counterY, 0, counterY + 8);
+  edge.addColorStop(0,   'rgba(255,255,255,0.65)');
+  edge.addColorStop(0.5, 'rgba(230,230,230,0.2)');
+  edge.addColorStop(1,   'rgba(200,200,200,0)');
+  ctx.fillStyle = edge;
+  ctx.fillRect(0, counterY, W, 8);
+}
+
+function drawIce(ic) {
+  ctx.save();
+  ctx.globalAlpha = ic.alpha;
+  ctx.translate(ic.x, ic.y);
+
+  const hw = ICE_W / 2, hh = ICE_H / 2;
+
+  // Drop shadow on counter
+  if (ic.y >= counterY - ICE_H / 2 - 2) {
+    ctx.save();
+    ctx.globalAlpha = ic.alpha * 0.3;
+    const sg = ctx.createRadialGradient(0, hh + 2, 5, 0, hh + 8, hw * 0.85);
+    sg.addColorStop(0,   'rgba(0,0,0,0.55)');
+    sg.addColorStop(0.5, 'rgba(0,0,0,0.2)');
+    sg.addColorStop(1,   'rgba(0,0,0,0)');
+    ctx.fillStyle = sg;
+    ctx.fillRect(-hw * 0.9, hh - 2, ICE_W * 0.9, 20);
+    ctx.restore();
+  }
+
+  // Body gradient
+  const body = ctx.createLinearGradient(-hw, -hh, hw, hh);
+  body.addColorStop(0,    'rgba(215,238,255,0.85)');
+  body.addColorStop(0.35, 'rgba(190,222,255,0.68)');
+  body.addColorStop(0.7,  'rgba(175,212,250,0.72)');
+  body.addColorStop(1,    'rgba(155,198,245,0.78)');
+  ctx.fillStyle   = body;
+  ctx.strokeStyle = 'rgba(210,235,255,0.9)';
+  ctx.lineWidth   = 1.5;
+  roundRect(ctx, -hw, -hh, ICE_W, ICE_H, 4);
+  ctx.fill();
+  ctx.stroke();
+
+  // Inner refraction / frost lines
+  ctx.save();
+  ctx.globalAlpha = ic.alpha * 0.40;
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth   = 1;
+  const refs = [
+    [-hw * 0.55, -hh * 0.25,  hw * 0.20,  hh * 0.70],
+    [-hw * 0.10, -hh * 0.80,  hw * 0.65,  hh * 0.15],
+    [-hw * 0.80,  hh * 0.05,  hw * 0.05, -hh * 0.55],
+    [ hw * 0.05, -hh * 0.60, -hw * 0.45,  hh * 0.50]
+  ];
+  for (const [x0, y0, x1, y1] of refs) {
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  ctx.restore();
+
+  // Cracks (local coords)
+  if (ic.cracks.length) {
+    ctx.save();
+    ctx.globalAlpha = ic.alpha * 0.9;
+    ctx.strokeStyle = 'rgba(160,210,255,0.95)';
+    ctx.lineWidth   = 1.1;
+    for (const [x0, y0, x1, y1] of ic.cracks) {
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawShard(s) {
+  if (s.poly.length < 3) return;
+  ctx.save();
+  ctx.globalAlpha = s.alpha;
+  ctx.translate(s.x, s.y);
+
+  // Shadow (only when near counter)
+  if (!s.falling && !s.airborne) {
+    ctx.save();
+    ctx.globalAlpha = s.alpha * 0.22;
+    ctx.fillStyle   = 'rgba(0,0,0,0.45)';
+    ctx.beginPath();
+    ctx.ellipse(0, 12, 20, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Shard body
+  const g = ctx.createLinearGradient(-30, -30, 30, 30);
+  g.addColorStop(0,   'rgba(218,240,255,0.82)');
+  g.addColorStop(0.5, 'rgba(185,218,252,0.72)');
+  g.addColorStop(1,   'rgba(158,200,245,0.75)');
+  ctx.fillStyle   = g;
+  ctx.strokeStyle = 'rgba(210,235,255,0.92)';
+  ctx.lineWidth   = 1;
+
+  ctx.beginPath();
+  ctx.moveTo(s.poly[0][0], s.poly[0][1]);
+  for (let i = 1; i < s.poly.length; i++) ctx.lineTo(s.poly[i][0], s.poly[i][1]);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawSpawning() {
+  const t = spawnTimer / SPAWN_FRAMES;
+  ctx.save();
+  // Draw the ice in its rest position with fading alpha
+  const fakeIce = {
+    x: W / 2,
+    y: counterY - ICE_H / 2,
+    cracks: [],
+    alpha: t
+  };
+  ctx.restore();
+  drawIce(fakeIce);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+// ─── Cursor hint ──────────────────────────────────────────────────────────────
+function updateCursor() {
+  if (state === 'held') { canvas.style.cursor = 'grabbing'; return; }
+  if (state === 'idle' && ice && hitBox(mouse.x, mouse.y, ice.x, ice.y, ICE_W, ICE_H)) {
+    canvas.style.cursor = 'grab'; return;
+  }
+  if (state === 'cracked') {
+    for (const s of shards) {
+      if (!s.falling && hitPoly(mouse.x - s.x, mouse.y - s.y, s.poly)) {
+        canvas.style.cursor = 'grab'; return;
+      }
+    }
+  }
+  canvas.style.cursor = 'default';
+}
+
+// ─── Main loop ────────────────────────────────────────────────────────────────
+function frame() {
+  update();
+  updateCursor();
+
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+  drawCounter();
+
+  if ((state === 'idle' || state === 'held') && ice) {
+    drawIce(ice);
+  }
+  if (state === 'cracked') {
+    for (const s of shards) drawShard(s);
+  }
+  if (state === 'spawning') {
+    drawSpawning();
+  }
+
+  requestAnimationFrame(frame);
+}
+
+// Start
+ice = mkIce();
+frame();
+</script>
+</body>
+</html>
