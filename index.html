@@ -105,11 +105,12 @@ const mouse = { x: 0, y: 0, down: false };
 let drag = null;
 let heldOffX = 0, heldOffY = 0;
 
-// For velocity estimation on release
-let prevMouseX = 0, prevMouseY = 0;
+// For velocity estimation on release — records the last N animation-frame
+// mouse positions while the cube is held, so we can compute a throw velocity.
+const VELOCITY_SAMPLE_COUNT = 5; // how many recent frames to average
+let mouseHistory = [];           // array of { x, y } snapshots
 
 canvas.addEventListener('mousemove', e => {
-  prevMouseX = mouse.x; prevMouseY = mouse.y;
   mouse.x = e.clientX; mouse.y = e.clientY;
 });
 
@@ -121,6 +122,7 @@ canvas.addEventListener('mousedown', e => {
     drag = { type: 'ice' };
     state = 'held';
     canvas.style.cursor = 'grabbing';
+    mouseHistory = []; // Clear old history so the throw reads only this drag
   } else if (state === 'cracked') {
     for (let i = 0; i < shards.length; i++) {
       const s = shards[i];
@@ -192,16 +194,37 @@ function makeCrackLines(count, minLen, maxLen) {
 function releaseDrop() {
   const restY = counterY - ICE_H / 2;
   if (ice.y >= restY - 10) {
-    // Barely lifted — just settle
+    // Barely lifted — just settle back with no throw
     ice.y  = restY;
     ice.vx = 0;
     ice.vy = 0;
     state  = 'idle';
+    mouseHistory = [];
     return;
   }
-  // Start falling with zero downward velocity; gravity takes over
-  ice.vy = 0;
-  state  = 'falling';
+
+  // ── Compute throw velocity from mouse history ────────────────────────────
+  // Average the displacement across the sampled frames to get px-per-frame.
+  let throwVx = 0, throwVy = 0;
+  if (mouseHistory.length >= 2) {
+    const oldest = mouseHistory[0];
+    const newest = mouseHistory[mouseHistory.length - 1];
+    const frames = mouseHistory.length - 1; // number of intervals between samples
+    throwVx = (newest.x - oldest.x) / frames;
+    throwVy = (newest.y - oldest.y) / frames;
+  }
+
+  // Cap velocity so the cube can never leave the screen in one frame.
+  // Horizontal max: 15 px/frame, vertical max: 20 px/frame (upward = negative).
+  throwVx = Math.max(-15, Math.min(15,  throwVx));
+  throwVy = Math.max(-20, Math.min(20,  throwVy));
+
+  // Apply throw velocity; gravity takes over from here
+  ice.vx = throwVx;
+  ice.vy = throwVy;
+
+  mouseHistory = []; // Done with this throw — clear for next drag
+  state = 'falling';
 }
 
 // Called when the falling ice cube hits the counter.
@@ -368,6 +391,14 @@ function update() {
 
   // ── held ──
   if (state === 'held' && ice) {
+    // Record mouse position once per animation frame for velocity estimation.
+    // Using per-frame sampling (rather than mousemove events) gives consistent
+    // px-per-frame units that match the physics update rate.
+    mouseHistory.push({ x: mouse.x, y: mouse.y });
+    if (mouseHistory.length > VELOCITY_SAMPLE_COUNT) {
+      mouseHistory.shift(); // Drop oldest — keep only the most recent N frames
+    }
+
     const targetX = mouse.x - heldOffX;
     const targetY = mouse.y - heldOffY;
     const onCounter = ice.y >= counterY - ICE_H / 2 - 2;
@@ -388,7 +419,26 @@ function update() {
     ice.vy += 0.6;   // gravity = 0.6px per frame squared
     ice.x  += ice.vx;
     ice.y  += ice.vy;
-    ice.vx *= 0.99;
+    ice.vx *= 0.99;  // light air resistance on horizontal movement
+
+    // ── Wall bouncing (left/right) with 0.5 dampening ───────────────────────
+    // The cube bounces off each wall and loses half its horizontal speed.
+    if (ice.x - ICE_W / 2 < 0) {
+      ice.x  = ICE_W / 2;          // push back inside left wall
+      ice.vx = -ice.vx * 0.5;      // reverse and halve horizontal velocity
+    }
+    if (ice.x + ICE_W / 2 > W) {
+      ice.x  = W - ICE_W / 2;      // push back inside right wall
+      ice.vx = -ice.vx * 0.5;      // reverse and halve horizontal velocity
+    }
+
+    // ── Top of screen constraint ─────────────────────────────────────────────
+    // If the cube was thrown upward and reaches the top edge, stop it there.
+    // Gravity then pulls it straight back down.
+    if (ice.y - ICE_H / 2 < 0) {
+      ice.y  = ICE_H / 2;
+      ice.vy = 0; // cancel upward momentum; gravity takes over immediately
+    }
 
     const restY = counterY - ICE_H / 2;
     if (ice.y >= restY) {
