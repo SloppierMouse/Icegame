@@ -47,6 +47,8 @@ let state = 'idle';
 // Ice cube
 let ice = null;          // { x, y, vx, vy, cracks[], alpha }
 function mkIce() {
+  // A fresh cube always starts with no cracks — cracks reset only here,
+  // which is called AFTER the full shatter → melt → spawn sequence.
   return { x: W / 2, y: counterY - ICE_H / 2, vx: 0, vy: 0, cracks: [], alpha: 1 };
 }
 function resetIcePos() { if (ice) { ice.x = W / 2; ice.y = counterY - ICE_H / 2; } }
@@ -65,6 +67,13 @@ let puddleData  = null;      // { x, y, rx, ry, alpha }
 // Spawning
 let spawnTimer = 0;
 const SPAWN_FRAMES = 60;     // 1 second at 60 fps
+
+// ─── Crack accumulation thresholds ────────────────────────────────────────────
+// The cube breaks apart only when EITHER enough crack lines have built up OR
+// their total combined length is long enough.  Tuned so that 3–5 gentle drops
+// feel like a slow build-up while 1–2 hard drops can shatter the cube.
+const CRACK_COUNT_THRESHOLD  = 7;    // break when this many crack lines have accumulated
+const CRACK_LENGTH_THRESHOLD = 200;  // or when their total pixel length exceeds this
 
 // Mouse / drag
 const mouse = { x: 0, y: 0, down: false };
@@ -125,6 +134,36 @@ function hitPoly(lx, ly, poly) {
   return inside;
 }
 
+// ─── Crack helpers ────────────────────────────────────────────────────────────
+
+// Sum the pixel length of every crack line currently stored on the ice cube.
+// Used to decide whether accumulated damage has crossed the break threshold.
+function totalCrackLength(cracks) {
+  let total = 0;
+  for (const [x0, y0, x1, y1] of cracks) {
+    const dx = x1 - x0, dy = y1 - y0;
+    total += Math.sqrt(dx * dx + dy * dy);
+  }
+  return total;
+}
+
+// Generate `count` random crack lines radiating outward from the ice centre.
+// Each line starts a few pixels from the centre and extends minLen–maxLen px.
+function makeCrackLines(count, minLen, maxLen) {
+  const lines = [];
+  for (let i = 0; i < count; i++) {
+    const angle = rnd(0, Math.PI * 2);
+    const len   = rnd(minLen, maxLen);
+    lines.push([
+      Math.cos(angle) * 4,    // start X (small offset from centre)
+      Math.sin(angle) * 4,    // start Y
+      Math.cos(angle) * len,  // end X
+      Math.sin(angle) * len   // end Y
+    ]);
+  }
+  return lines;
+}
+
 // ─── Drop / crack logic ───────────────────────────────────────────────────────
 function releaseDrop() {
   const restY = counterY - ICE_H / 2;
@@ -141,47 +180,66 @@ function releaseDrop() {
   state  = 'falling';
 }
 
-// Called when falling ice hits the countertop — impact velocity determines crack type
+// Called when the falling ice cube hits the counter.
+// Each impact ADDS new crack lines on top of the existing ones — cracks are
+// never cleared between drops.  The cube only shatters once the total number
+// of crack lines OR their combined pixel length crosses a threshold.
 function impactCrack(impactVy) {
   const cx = ice.x;
   const cy = counterY - ICE_H / 2;
 
   if (impactVy < 6) {
-    // Slow impact — settle
+    // Very slow tap — settle quietly with no new crack
     ice.y  = cy;
     ice.vx = 0;
     ice.vy = 0;
     state  = 'idle';
     return;
   }
-  if (impactVy < 12) {
-    shortCrack(cx, cy);
-  } else if (impactVy < 20) {
-    mediumCrack(cx, cy);
-  } else {
-    highCrack(cx, cy);
-  }
-}
 
-// Short drop — surface cracks appear, cube stays whole
-function shortCrack(cx, cy) {
-  const count = rndInt(4, 6);
-  const lines  = [];
-  for (let i = 0; i < count; i++) {
-    const angle = rnd(0, Math.PI * 2);
-    const len   = rnd(15, 50);
-    lines.push([
-      Math.cos(angle) * 4,
-      Math.sin(angle) * 4,
-      Math.cos(angle) * len,
-      Math.sin(angle) * len
-    ]);
+  // ── Add new crack lines based on how hard the drop was ──────────────────
+  let newCracks;
+  if (impactVy < 12) {
+    // Low-velocity drop — 1–2 short surface cracks
+    newCracks = makeCrackLines(rndInt(1, 2), 15, 40);
+  } else if (impactVy < 20) {
+    // Medium-velocity drop — 2–4 longer cracks
+    newCracks = makeCrackLines(rndInt(2, 4), 35, 65);
+  } else {
+    // High-velocity drop — 4–6 deep, long cracks
+    newCracks = makeCrackLines(rndInt(4, 6), 50, 85);
   }
-  ice.cracks = lines;   // local to ice center
-  ice.y  = cy;
-  ice.vx = 0;
-  ice.vy = 0;
-  state  = 'idle';
+
+  // Accumulate onto existing cracks — NEVER wipe them between drops
+  for (const crack of newCracks) {
+    ice.cracks.push(crack);
+  }
+
+  // ── Check whether accumulated damage crosses the break threshold ─────────
+  const crackCount  = ice.cracks.length;
+  const crackLength = totalCrackLength(ice.cracks);
+  const shouldBreak = crackCount  >= CRACK_COUNT_THRESHOLD
+                   || crackLength >= CRACK_LENGTH_THRESHOLD;
+
+  if (shouldBreak) {
+    // Shatter — severity (shard count + spread) based on velocity of final blow
+    if (impactVy >= 15) {
+      shards = genShards(cx, cy, rndInt(8, 14), 2.5);  // many small shards
+    } else {
+      shards = genShards(cx, cy, rndInt(4, 6), 1.0);   // fewer larger chunks
+    }
+    // Destroy the ice object — accumulated cracks go with it.
+    // mkIce() (which resets cracks to []) is only called at the END of the
+    // full shatter → melt → puddle → spawn sequence, never before.
+    ice   = null;
+    state = 'cracked';
+  } else {
+    // Cube survives this drop — settle back onto the counter with cracks intact
+    ice.y  = cy;
+    ice.vx = 0;
+    ice.vy = 0;
+    state  = 'idle';
+  }
 }
 
 // Generate polygonal shards from an ice rect centred at (cx, cy)
@@ -245,18 +303,6 @@ function genShards(cx, cy, count, spread) {
     });
   }
   return result;
-}
-
-function mediumCrack(cx, cy) {
-  shards = genShards(cx, cy, rndInt(4, 6), 1.0);
-  ice    = null;
-  state  = 'cracked';
-}
-
-function highCrack(cx, cy) {
-  shards = genShards(cx, cy, rndInt(8, 14), 2.5);
-  ice    = null;
-  state  = 'cracked';
 }
 
 // ─── Sutherland-Hodgman clipping ──────────────────────────────────────────────
@@ -452,7 +498,7 @@ function update() {
   if (state === 'spawning') {
     spawnTimer++;
     if (spawnTimer >= SPAWN_FRAMES) {
-      ice   = mkIce();
+      ice   = mkIce();   // fresh cube with empty cracks[] — crack state resets here
       state = 'idle';
     }
   }
@@ -569,7 +615,7 @@ function drawIce(ic) {
   }
   ctx.restore();
 
-  // Cracks (local coords)
+  // Cracks (local coords) — all accumulated crack lines drawn together
   if (ic.cracks.length) {
     ctx.save();
     ctx.globalAlpha = ic.alpha * 0.9;
