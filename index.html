@@ -402,6 +402,7 @@ function update() {
     const targetX = mouse.x - heldOffX;
     const targetY = mouse.y - heldOffY;
     const onCounter = ice.y >= counterY - ICE_H / 2 - 2;
+    const prevIceY  = ice.y; // capture Y before update to measure actual speed this frame
 
     if (onCounter && targetY > counterY - ICE_H / 2 - 15) {
       // Slide on counter before lift
@@ -411,6 +412,24 @@ function update() {
     } else {
       ice.x += (targetX - ice.x) * 0.15;
       ice.y += (targetY - ice.y) * 0.15;
+    }
+
+    // ── Smash detection: slam the cube into the counter while still holding ──
+    // If the cube crosses the counter surface this frame while being dragged
+    // downward fast enough, trigger the same shatter as a high-velocity drop.
+    const restY      = counterY - ICE_H / 2;
+    const iceFrameVy = ice.y - prevIceY; // actual downward speed of the cube this frame
+    // smash threshold: 12px/frame — easy to tune
+    if (ice.y >= restY && iceFrameVy > 12) {
+      const smashX = ice.x;
+      ice.y  = restY; // snap flush with counter before shattering
+      shards = genShards(smashX, restY, rndInt(8, 14), 2.5); // same as high-velocity drop
+      ice    = null;
+      state  = 'cracked';
+      // Mouse releases automatically — clear drag state so input is clean
+      drag   = null;
+      canvas.style.cursor = 'default';
+      mouseHistory = [];
     }
   }
 
