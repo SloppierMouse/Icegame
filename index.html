@@ -103,10 +103,13 @@ const CRACK_LENGTH_THRESHOLD = 200;  // or when their total pixel length exceeds
 // ─── Rotation physics ─────────────────────────────────────────────────────────
 // The cube hangs from the grab point like a pendulum: pivot = mouse, rod = grab-to-center.
 // Gravity restores the cube to hang directly below the pivot; damping settles the swing.
-const PENDULUM_GRAVITY       = 0.6;     // gravity constant matching free-fall (px/frame²)
-const PENDULUM_DAMP          = 0.97;    // angular velocity multiplier per frame — damps the swing
-const ANGULAR_CARRY_DURATION = 30;      // frames (≈0.5 s at 60 fps) to carry rotation after release
-let angularCarryFrames = 0;             // counts frames since release into falling state
+// When the mouse swings side-to-side the pendulum builds angular velocity naturally.
+// On release the spin carries into free-fall and decays at SPIN_DAMP each frame.
+const PENDULUM_GRAVITY = 0.6;   // gravity constant matching free-fall (px/frame²)
+const PENDULUM_DAMP    = 0.97;  // angular velocity multiplier per frame — damps swing while held
+// Post-release spin damping: 0.97 per frame → ~16 % remaining after 60 frames (~1 s at 60 fps).
+// Tunable: lower value stops the spin faster, higher value lets it coast longer.
+const SPIN_DAMP        = 0.97;
 
 // Mouse / drag
 const mouse = { x: 0, y: 0, down: false };
@@ -224,7 +227,6 @@ function releaseDrop() {
     // Snap rotation back to flat when settling onto counter
     ice.angle      = 0;
     ice.angularVel = 0;
-    angularCarryFrames = 0;
     state  = 'idle';
     mouseHistory = [];
     return;
@@ -256,8 +258,7 @@ function releaseDrop() {
   ice.vx = throwVx;
   ice.vy = throwVy;
 
-  mouseHistory       = []; // Done with this throw — clear for next drag
-  angularCarryFrames = 0;  // Start the 0.5 s carry-then-damp timer
+  mouseHistory = []; // Done with this throw — clear for next drag
   state = 'falling';
 }
 
@@ -276,7 +277,6 @@ function impactCrack(impactVy) {
     ice.vy = 0;
     ice.angle      = 0;  // snap flat when resting on counter
     ice.angularVel = 0;
-    angularCarryFrames = 0;
     state  = 'idle';
     return;
   }
@@ -324,7 +324,6 @@ function impactCrack(impactVy) {
     ice.vy = 0;
     ice.angle      = 0;  // snap flat when resting on counter
     ice.angularVel = 0;
-    angularCarryFrames = 0;
     state  = 'idle';
   }
 }
@@ -496,14 +495,12 @@ function update() {
     ice.y  += ice.vy;
     ice.vx *= 0.99;  // light air resistance on horizontal movement
 
-    // ── Angular velocity carry after release ─────────────────────────────────
-    // For the first 0.5 s (ANGULAR_CARRY_DURATION frames) the cube spins freely
-    // at whatever angular velocity it had when released.  After that, damp it out.
-    ice.angle += ice.angularVel;
-    if (angularCarryFrames >= ANGULAR_CARRY_DURATION) {
-      ice.angularVel *= 0.88; // stronger damping after carry period expires
-    }
-    angularCarryFrames++;
+    // ── Angular velocity after release — spin carries, then fades out ────────
+    // Gravity built angular velocity while the cube was held (pendulum physics).
+    // That spin carries into free-fall and decays by SPIN_DAMP each frame, so
+    // it feels physical: the cube rotates visibly for ~1 second then settles.
+    ice.angle      += ice.angularVel;
+    ice.angularVel *= SPIN_DAMP;
 
     // ── Wall bouncing (left/right) with 0.5 dampening ───────────────────────
     // The cube bounces off each wall and loses half its horizontal speed.
