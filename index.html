@@ -69,11 +69,12 @@ let state = 'idle';
 let cubeCount = 0;
 
 // Ice cube
-let ice = null;          // { x, y, vx, vy, cracks[], alpha }
+let ice = null;          // { x, y, vx, vy, cracks[], alpha, angle, angularVel }
 function mkIce() {
   // A fresh cube always starts with no cracks — cracks reset only here,
   // which is called AFTER the full shatter → melt → spawn sequence.
-  return { x: W / 2, y: counterY - ICE_H / 2, vx: 0, vy: 0, cracks: [], alpha: 1 };
+  return { x: W / 2, y: counterY - ICE_H / 2, vx: 0, vy: 0, cracks: [], alpha: 1,
+           angle: 0, angularVel: 0 };
 }
 function resetIcePos() { if (ice) { ice.x = W / 2; ice.y = counterY - ICE_H / 2; } }
 
@@ -99,6 +100,14 @@ const SPAWN_FRAMES = 60;     // 1 second at 60 fps
 const CRACK_COUNT_THRESHOLD  = 7;    // break when this many crack lines have accumulated
 const CRACK_LENGTH_THRESHOLD = 200;  // or when their total pixel length exceeds this
 
+// ─── Rotation physics ─────────────────────────────────────────────────────────
+// The cube swings like a pendulum hung from wherever the player grabs it.
+// Grabbing the center produces no torque; grabbing a corner produces maximum dangle.
+const TORQUE_FACTOR          = 0.00015; // angular acceleration per pixel of arm length each frame
+const ANGULAR_DAMP           = 0.97;    // multiplier applied to angular velocity each frame while held
+const ANGULAR_CARRY_DURATION = 30;      // frames (≈0.5 s at 60 fps) to carry rotation after release
+let angularCarryFrames = 0;             // counts frames since release into falling state
+
 // Mouse / drag
 const mouse = { x: 0, y: 0, down: false };
 // drag = null | { type:'ice' } | { type:'shard', idx, offX, offY }
@@ -117,6 +126,7 @@ canvas.addEventListener('mousemove', e => {
 canvas.addEventListener('mousedown', e => {
   mouse.down = true;
   if (state === 'idle' && ice && hitBox(mouse.x, mouse.y, ice.x, ice.y, ICE_W, ICE_H)) {
+    // Record offset from cube CENTER — this becomes the pendulum arm used each frame
     heldOffX = mouse.x - ice.x;
     heldOffY = mouse.y - ice.y;
     drag = { type: 'ice' };
@@ -198,6 +208,10 @@ function releaseDrop() {
     ice.y  = restY;
     ice.vx = 0;
     ice.vy = 0;
+    // Snap rotation back to flat when settling onto counter
+    ice.angle      = 0;
+    ice.angularVel = 0;
+    angularCarryFrames = 0;
     state  = 'idle';
     mouseHistory = [];
     return;
@@ -219,11 +233,13 @@ function releaseDrop() {
   throwVx = Math.max(-15, Math.min(15,  throwVx));
   throwVy = Math.max(-20, Math.min(20,  throwVy));
 
-  // Apply throw velocity; gravity takes over from here
+  // Apply throw velocity; gravity takes over from here.
+  // Angular velocity from the drag carries into the fall — do NOT reset it here.
   ice.vx = throwVx;
   ice.vy = throwVy;
 
-  mouseHistory = []; // Done with this throw — clear for next drag
+  mouseHistory       = []; // Done with this throw — clear for next drag
+  angularCarryFrames = 0;  // Start the 0.5 s carry-then-damp timer
   state = 'falling';
 }
 
@@ -240,6 +256,9 @@ function impactCrack(impactVy) {
     ice.y  = cy;
     ice.vx = 0;
     ice.vy = 0;
+    ice.angle      = 0;  // snap flat when resting on counter
+    ice.angularVel = 0;
+    angularCarryFrames = 0;
     state  = 'idle';
     return;
   }
@@ -285,6 +304,9 @@ function impactCrack(impactVy) {
     ice.y  = cy;
     ice.vx = 0;
     ice.vy = 0;
+    ice.angle      = 0;  // snap flat when resting on counter
+    ice.angularVel = 0;
+    angularCarryFrames = 0;
     state  = 'idle';
   }
 }
@@ -414,6 +436,20 @@ function update() {
       ice.y += (targetY - ice.y) * 0.15;
     }
 
+    // ── Pendulum rotation: torque from grab offset each frame ────────────────
+    // The cube swings from the grab point. Distance from center drives the torque:
+    // dead center = no arm = no torque; corner grab = max arm = max dangle.
+    const armLen = Math.sqrt(heldOffX * heldOffX + heldOffY * heldOffY);
+    if (armLen > 1) {
+      // Natural equilibrium angle: rotate so grab point is directly above center.
+      // atan2(gx, -gy) gives the angle at which the grab arm points straight up.
+      const eqAngle = Math.atan2(heldOffX, -heldOffY);
+      // Pendulum restoring torque: sin keeps it periodic so full rotations are possible
+      ice.angularVel -= Math.sin(ice.angle - eqAngle) * armLen * TORQUE_FACTOR;
+    }
+    ice.angularVel *= ANGULAR_DAMP;   // damping — cube settles, never spins forever
+    ice.angle      += ice.angularVel; // rotation updates independently from position
+
     // ── Smash detection: slam the cube into the counter while still holding ──
     // If the cube crosses the counter surface this frame while being dragged
     // downward fast enough, trigger the same shatter as a high-velocity drop.
@@ -440,6 +476,15 @@ function update() {
     ice.y  += ice.vy;
     ice.vx *= 0.99;  // light air resistance on horizontal movement
 
+    // ── Angular velocity carry after release ─────────────────────────────────
+    // For the first 0.5 s (ANGULAR_CARRY_DURATION frames) the cube spins freely
+    // at whatever angular velocity it had when released.  After that, damp it out.
+    ice.angle += ice.angularVel;
+    if (angularCarryFrames >= ANGULAR_CARRY_DURATION) {
+      ice.angularVel *= 0.88; // stronger damping after carry period expires
+    }
+    angularCarryFrames++;
+
     // ── Wall bouncing (left/right) with 0.5 dampening ───────────────────────
     // The cube bounces off each wall and loses half its horizontal speed.
     if (ice.x - ICE_W / 2 < 0) {
@@ -459,6 +504,7 @@ function update() {
       ice.vy = 0; // cancel upward momentum; gravity takes over immediately
     }
 
+    // TODO: ground collision uses bounding box, may clip when rotated
     const restY = counterY - ICE_H / 2;
     if (ice.y >= restY) {
       ice.y = restY;
@@ -669,7 +715,7 @@ function drawIce(ic) {
 
   const hw = ICE_W / 2, hh = ICE_H / 2;
 
-  // Drop shadow on counter
+  // Drop shadow on counter — drawn BEFORE rotation so it stays flat
   if (ic.y >= counterY - ICE_H / 2 - 2) {
     ctx.save();
     ctx.globalAlpha = ic.alpha * 0.3;
@@ -681,6 +727,10 @@ function drawIce(ic) {
     ctx.fillRect(-hw * 0.9, hh - 2, ICE_W * 0.9, 20);
     ctx.restore();
   }
+
+  // Rotate the cube body around its own center.
+  // ic.angle is 0 on a fresh or resting cube; non-zero when grabbed off-center.
+  ctx.rotate(ic.angle || 0);
 
   // Body gradient
   const body = ctx.createLinearGradient(-hw, -hh, hw, hh);
