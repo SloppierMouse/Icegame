@@ -101,10 +101,10 @@ const CRACK_COUNT_THRESHOLD  = 7;    // break when this many crack lines have ac
 const CRACK_LENGTH_THRESHOLD = 200;  // or when their total pixel length exceeds this
 
 // ─── Rotation physics ─────────────────────────────────────────────────────────
-// The cube swings like a pendulum hung from wherever the player grabs it.
-// Grabbing the center produces no torque; grabbing a corner produces maximum dangle.
-const TORQUE_FACTOR          = 0.00015; // angular acceleration per pixel of arm length each frame
-const ANGULAR_DAMP           = 0.97;    // multiplier applied to angular velocity each frame while held
+// The cube hangs from the grab point like a pendulum: pivot = mouse, rod = grab-to-center.
+// Gravity restores the cube to hang directly below the pivot; damping settles the swing.
+const PENDULUM_GRAVITY       = 0.6;     // gravity constant matching free-fall (px/frame²)
+const PENDULUM_DAMP          = 0.97;    // angular velocity multiplier per frame — damps the swing
 const ANGULAR_CARRY_DURATION = 30;      // frames (≈0.5 s at 60 fps) to carry rotation after release
 let angularCarryFrames = 0;             // counts frames since release into falling state
 
@@ -112,7 +112,14 @@ let angularCarryFrames = 0;             // counts frames since release into fall
 const mouse = { x: 0, y: 0, down: false };
 // drag = null | { type:'ice' } | { type:'shard', idx, offX, offY }
 let drag = null;
-let heldOffX = 0, heldOffY = 0;
+
+// Pendulum state — initialised on grab, used every held frame
+// The grab point (mouse) is the fixed pivot; the cube hangs below on a rigid rod.
+let pendulumLen         = 0;  // rod length: distance from grab point to cube center (px)
+let pendulumAngle       = 0;  // rod angle from downward vertical (0 = straight down), radians
+let pendulumAngVel      = 0;  // angular velocity of pendulum (rad/frame)
+let pendulumAngleAtGrab = 0;  // pendulumAngle recorded at moment of grab
+let cubeAngleAtGrab     = 0;  // ice.angle recorded at moment of grab
 
 // For velocity estimation on release — records the last N animation-frame
 // mouse positions while the cube is held, so we can compute a throw velocity.
@@ -126,9 +133,15 @@ canvas.addEventListener('mousemove', e => {
 canvas.addEventListener('mousedown', e => {
   mouse.down = true;
   if (state === 'idle' && ice && hitBox(mouse.x, mouse.y, ice.x, ice.y, ICE_W, ICE_H)) {
-    // Record offset from cube CENTER — this becomes the pendulum arm used each frame
-    heldOffX = mouse.x - ice.x;
-    heldOffY = mouse.y - ice.y;
+    // Compute the pendulum rod: vector from grab point (mouse) to cube center.
+    // The rod length and initial angle define the entire pendulum for this drag.
+    const rodX          = ice.x - mouse.x;
+    const rodY          = ice.y - mouse.y;
+    pendulumLen         = Math.sqrt(rodX * rodX + rodY * rodY);
+    pendulumAngle       = Math.atan2(rodX, rodY); // angle from downward (+Y axis in screen space)
+    pendulumAngleAtGrab = pendulumAngle;
+    pendulumAngVel      = 0;
+    cubeAngleAtGrab     = ice.angle;
     drag = { type: 'ice' };
     state = 'held';
     canvas.style.cursor = 'grabbing';
@@ -227,6 +240,11 @@ function releaseDrop() {
     throwVx = (newest.x - oldest.x) / frames;
     throwVy = (newest.y - oldest.y) / frames;
   }
+
+  // Add tangential velocity from pendulum swing: cube on a swinging rod inherits
+  // speed at its end of the rod even if the mouse (pivot) was nearly stationary.
+  throwVx +=  pendulumAngVel * pendulumLen * Math.cos(pendulumAngle);
+  throwVy -= pendulumAngVel * pendulumLen * Math.sin(pendulumAngle);
 
   // Cap velocity so the cube can never leave the screen in one frame.
   // Horizontal max: 15 px/frame, vertical max: 20 px/frame (upward = negative).
@@ -421,34 +439,36 @@ function update() {
       mouseHistory.shift(); // Drop oldest — keep only the most recent N frames
     }
 
-    const targetX = mouse.x - heldOffX;
-    const targetY = mouse.y - heldOffY;
+    // ── Pendulum physics: pivot is the grab point (mouse); rod swings under gravity ──
+    // Angular acceleration = -(g / L) * sin(θ), same formula as a real pendulum.
+    // At equilibrium the cube hangs straight down from the mouse (θ = 0).
+    if (pendulumLen > 1) {
+      pendulumAngVel += -(PENDULUM_GRAVITY / pendulumLen) * Math.sin(pendulumAngle);
+      pendulumAngVel *= PENDULUM_DAMP;  // damping — swing settles, never spins forever
+      pendulumAngle  += pendulumAngVel;
+    }
+
+    // Cube center position is fully determined by the pendulum rod
+    const targetX  = mouse.x + pendulumLen * Math.sin(pendulumAngle);
+    const targetY  = mouse.y + pendulumLen * Math.cos(pendulumAngle);
     const onCounter = ice.y >= counterY - ICE_H / 2 - 2;
     const prevIceY  = ice.y; // capture Y before update to measure actual speed this frame
 
     if (onCounter && targetY > counterY - ICE_H / 2 - 15) {
-      // Slide on counter before lift
+      // Still on counter — slide smoothly, no pendulum lift yet
       const slideX = Math.max(ICE_W / 2, Math.min(W - ICE_W / 2, targetX));
       ice.x += (slideX - ice.x) * 0.22;
       ice.y  = counterY - ICE_H / 2;
     } else {
-      ice.x += (targetX - ice.x) * 0.15;
-      ice.y += (targetY - ice.y) * 0.15;
+      // In the air — position is fully driven by pendulum physics
+      ice.x = targetX;
+      ice.y = targetY;
     }
 
-    // ── Pendulum rotation: torque from grab offset each frame ────────────────
-    // The cube swings from the grab point. Distance from center drives the torque:
-    // dead center = no arm = no torque; corner grab = max arm = max dangle.
-    const armLen = Math.sqrt(heldOffX * heldOffX + heldOffY * heldOffY);
-    if (armLen > 1) {
-      // Natural equilibrium angle: rotate so grab point is directly above center.
-      // atan2(gx, -gy) gives the angle at which the grab arm points straight up.
-      const eqAngle = Math.atan2(heldOffX, -heldOffY);
-      // Pendulum restoring torque: sin keeps it periodic so full rotations are possible
-      ice.angularVel -= Math.sin(ice.angle - eqAngle) * armLen * TORQUE_FACTOR;
-    }
-    ice.angularVel *= ANGULAR_DAMP;   // damping — cube settles, never spins forever
-    ice.angle      += ice.angularVel; // rotation updates independently from position
+    // Cube body rotates with the pendulum so the grab corner stays at the pivot.
+    // When pendulumAngle decreases, ice.angle increases by the same amount (opposite sign).
+    ice.angle      = cubeAngleAtGrab - (pendulumAngle - pendulumAngleAtGrab);
+    ice.angularVel = -pendulumAngVel; // kept in sync so release inherits correct spin
 
     // ── Smash detection: slam the cube into the counter while still holding ──
     // If the cube crosses the counter surface this frame while being dragged
