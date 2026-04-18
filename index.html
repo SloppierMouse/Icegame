@@ -169,6 +169,23 @@ canvas.addEventListener('mouseup', () => {
   if (state === 'held' && drag && drag.type === 'ice') {
     releaseDrop();
   }
+  // When releasing a dragged shard above the counter, re-enter the fall loop.
+  // Without this, a shard grabbed from the counter (airborne = false) would
+  // immediately snap back to counterY via the sliding code on the next frame.
+  if (state === 'cracked' && drag && drag.type === 'shard') {
+    const s = shards[drag.idx];
+    if (s) {
+      const floor = counterY - 10;
+      if (s.y < floor - 5) {
+        // Shard is in the air — inherit velocity from drag and fall naturally
+        s.airborne = true;
+        s.airVy    = s.vy; // s.vy was updated each drag frame: ty - s.y (px/frame)
+      } else {
+        // Shard is at/near the counter — settle it flat so sliding code takes over
+        s.y = floor;
+      }
+    }
+  }
   drag = null;
   canvas.style.cursor = 'default';
 });
