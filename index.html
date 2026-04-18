@@ -101,15 +101,16 @@ const CRACK_COUNT_THRESHOLD  = 7;    // break when this many crack lines have ac
 const CRACK_LENGTH_THRESHOLD = 200;  // or when their total pixel length exceeds this
 
 // ─── Rotation physics ─────────────────────────────────────────────────────────
-// The cube hangs from the grab point like a pendulum: pivot = mouse, rod = grab-to-center.
-// Gravity restores the cube to hang directly below the pivot; damping settles the swing.
-// When the mouse swings side-to-side the pendulum builds angular velocity naturally.
+// The cube hangs from the grab point like a pendulum.
+// Mouse horizontal movement accelerates the swing; a spring-like restoring force
+// pulls the cube back toward hanging straight down (simulates gravity).
 // On release the spin carries into free-fall and decays at SPIN_DAMP each frame.
-const PENDULUM_GRAVITY = 0.6;   // gravity constant matching free-fall (px/frame²)
-const PENDULUM_DAMP    = 0.97;  // angular velocity multiplier per frame — damps swing while held
+const PENDULUM_MOUSE_ACCEL = 0.003; // how strongly horizontal mouse movement accelerates the swing — raise for snappier response
+const PENDULUM_RESTORE     = 0.008; // gravity-like restoring spring — pulls cube back to vertical; raise to resist swinging further
+const PENDULUM_DAMP        = 0.97;  // multiplies angular velocity each frame — 0.97 means ~16% remains after 1 second, settling the swing
 // Post-release spin damping: 0.97 per frame → ~16 % remaining after 60 frames (~1 s at 60 fps).
 // Tunable: lower value stops the spin faster, higher value lets it coast longer.
-const SPIN_DAMP        = 0.97;
+const SPIN_DAMP            = 0.97;
 
 // Mouse / drag
 const mouse = { x: 0, y: 0, down: false };
@@ -123,6 +124,7 @@ let pendulumAngle       = 0;  // rod angle from downward vertical (0 = straight 
 let pendulumAngVel      = 0;  // angular velocity of pendulum (rad/frame)
 let pendulumAngleAtGrab = 0;  // pendulumAngle recorded at moment of grab
 let cubeAngleAtGrab     = 0;  // ice.angle recorded at moment of grab
+let lastMouseX          = 0;  // mouse X from the previous frame — used to compute horizontal movement delta
 
 // For velocity estimation on release — records the last N animation-frame
 // mouse positions while the cube is held, so we can compute a throw velocity.
@@ -145,6 +147,7 @@ canvas.addEventListener('mousedown', e => {
     pendulumAngleAtGrab = pendulumAngle;
     pendulumAngVel      = 0;
     cubeAngleAtGrab     = ice.angle;
+    lastMouseX          = mouse.x; // capture grab position so the first frame's delta is zero
     drag = { type: 'ice' };
     state = 'held';
     canvas.style.cursor = 'grabbing';
@@ -438,14 +441,23 @@ function update() {
       mouseHistory.shift(); // Drop oldest — keep only the most recent N frames
     }
 
-    // ── Pendulum physics: pivot is the grab point (mouse); rod swings under gravity ──
-    // Angular acceleration = -(g / L) * sin(θ), same formula as a real pendulum.
-    // At equilibrium the cube hangs straight down from the mouse (θ = 0).
+    // ── Pendulum physics: mouse horizontal movement drives the swing ──
+    // Each frame: measure how far the mouse moved sideways, convert to angular
+    // acceleration, apply a gravity-like restoring force, then integrate.
     if (pendulumLen > 1) {
-      pendulumAngVel += -(PENDULUM_GRAVITY / pendulumLen) * Math.sin(pendulumAngle);
+      // How far the mouse moved sideways since last frame — this drives the swing
+      const deltaMouseX = mouse.x - lastMouseX;
+
+      // Angular acceleration from two sources combined:
+      let angularAccel  = deltaMouseX * PENDULUM_MOUSE_ACCEL; // mouse input swings the cube
+      angularAccel     -= pendulumAngle * PENDULUM_RESTORE;   // restoring force pulls back toward vertical (angle = 0)
+
+      pendulumAngVel += angularAccel;
       pendulumAngVel *= PENDULUM_DAMP;  // damping — swing settles, never spins forever
       pendulumAngle  += pendulumAngVel;
     }
+    // Always update lastMouseX so the next frame's delta reflects only this frame's movement
+    lastMouseX = mouse.x;
 
     // Cube center position is fully determined by the pendulum rod
     const targetX  = mouse.x + pendulumLen * Math.sin(pendulumAngle);
