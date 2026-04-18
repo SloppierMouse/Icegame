@@ -105,9 +105,10 @@ const CRACK_LENGTH_THRESHOLD = 200;  // or when their total pixel length exceeds
 // Mouse horizontal movement accelerates the swing; a spring-like restoring force
 // pulls the cube back toward hanging straight down (simulates gravity).
 // On release the spin carries into free-fall and decays at SPIN_DAMP each frame.
-const PENDULUM_MOUSE_ACCEL = 0.003; // how strongly horizontal mouse movement accelerates the swing — raise for snappier response
-const PENDULUM_RESTORE     = 0.008; // gravity-like restoring spring — pulls cube back to vertical; raise to resist swinging further
-const PENDULUM_DAMP        = 0.97;  // multiplies angular velocity each frame — 0.97 means ~16% remains after 1 second, settling the swing
+const PENDULUM_MOUSE_ACCEL = 0.0008; // how strongly horizontal mouse movement accelerates the swing — raise for snappier response
+const PENDULUM_RESTORE     = 0.015;  // gravity-like restoring spring — pulls cube back to vertical; raise to resist swinging further
+const PENDULUM_DAMP        = 0.88;   // multiplies angular velocity each frame — lower value settles the swing faster
+const MAX_PENDULUM_ANGVEL  = 0.08;   // maximum angular velocity in radians per frame — prevents overly aggressive spin
 // Post-release spin damping: 0.97 per frame → ~16 % remaining after 60 frames (~1 s at 60 fps).
 // Tunable: lower value stops the spin faster, higher value lets it coast longer.
 const SPIN_DAMP            = 0.97;
@@ -274,9 +275,8 @@ function impactCrack(impactVy) {
   const cy = counterY - ICE_H / 2;
 
   if (impactVy < 6) {
-    // Very slow tap — settle quietly with no new crack
+    // Very slow tap — settle quietly with no new crack; preserve horizontal velocity so cube can slide
     ice.y  = cy;
-    ice.vx = 0;
     ice.vy = 0;
     ice.angle      = 0;  // snap flat when resting on counter
     ice.angularVel = 0;
@@ -321,9 +321,8 @@ function impactCrack(impactVy) {
     ice   = null;
     state = 'cracked';
   } else {
-    // Cube survives this drop — settle back onto the counter with cracks intact
+    // Cube survives this drop — settle onto counter; preserve horizontal velocity so cube can slide
     ice.y  = cy;
-    ice.vx = 0;
     ice.vy = 0;
     ice.angle      = 0;  // snap flat when resting on counter
     ice.angularVel = 0;
@@ -372,10 +371,8 @@ function genShards(cx, cy, count, spread) {
     // Poly in LOCAL coords (relative to shard center)
     const localPoly = clipped.map(([px, py]) => [px - scx, py - scy]);
 
-    // Outward velocity + tiny random horizontal spread on impact
-    const dist  = Math.sqrt(scx * scx + scy * scy) || 1;
-    const speed = rnd(0.4, 2.0) * spread;
-    const vx    = (scx / dist) * speed + rnd(-1.0, 1.0);
+    // Random horizontal velocity at spawn; high drops also get an upward pop
+    const vx    = rnd(-4, 4);
     const airVy = spread > 1.5 ? rnd(-4, -1.5) : 0;  // upward pop for high drops
 
     result.push({
@@ -384,7 +381,7 @@ function genShards(cx, cy, count, spread) {
       poly: localPoly,
       alpha: 1,
       scale: 1,
-      airborne: airVy !== 0,
+      airborne: true,   // always apply gravity from frame one — no teleporting to counter
       airVy,
       bounced: false,
       falling: false,
@@ -424,8 +421,10 @@ function update() {
   if (state === 'idle') {
     if (!ice) { ice = mkIce(); }
     if (!drag) {
-      ice.vx *= 0.88;
+      // 0.985 friction lets the cube coast to a stop naturally after landing with horizontal velocity
+      ice.vx *= 0.985;
       ice.x  += ice.vx;
+      // Clamp to screen edges so the cube cannot slide off
       ice.x   = Math.max(ICE_W / 2, Math.min(W - ICE_W / 2, ice.x));
       ice.y   = counterY - ICE_H / 2;
     }
@@ -454,6 +453,8 @@ function update() {
 
       pendulumAngVel += angularAccel;
       pendulumAngVel *= PENDULUM_DAMP;  // damping — swing settles, never spins forever
+      // Clamp angular velocity so the cube never spins too aggressively
+      pendulumAngVel = Math.max(-MAX_PENDULUM_ANGVEL, Math.min(MAX_PENDULUM_ANGVEL, pendulumAngVel));
       pendulumAngle  += pendulumAngVel;
     }
     // Always update lastMouseX so the next frame's delta reflects only this frame's movement
