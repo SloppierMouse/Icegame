@@ -84,10 +84,11 @@ let shards = [];
 
 // Melt sequence
 let meltTimer   = 0;
-const MELT_FRAMES   = 120;   // 2 seconds at 60 fps
+const MELT_FRAMES        = 120;   // 2 seconds at 60 fps
 let puddleTimer = 0;
-const PUDDLE_FRAMES = 90;    // 1.5 seconds at 60 fps
-let puddleData  = null;      // { x, y, rx, ry, alpha }
+const PUDDLE_FADE_FRAMES = 60;    // 1 second at 60 fps — simultaneous shrink + fade
+let puddleData  = null;
+// puddleData = { x, y, radius, targetRadius, peakRadius, alpha, blobPoints, droplets }
 
 // Spawning
 let spawnTimer = 0;
@@ -631,7 +632,20 @@ function update() {
       const spreadX = Math.max(...groundedShards.map(s => s.x)) - Math.min(...groundedShards.map(s => s.x));
       // Keep only grounded shards for melt animation
       shards     = groundedShards.slice();
-      puddleData = { x: px, y: py + 10, rx: Math.max(40, spreadX * 0.35 + 30), ry: 14, alpha: 0 };
+      puddleData = {
+        x: px, y: py,
+        radius: 0,              // starts at zero — grows as droplets merge
+        targetRadius: 0,
+        peakRadius: 0,
+        alpha: 0.45,
+        blobPoints: mkBlobPoints(),
+        droplets: []
+      };
+      // Stagger droplet spawns so each shard's melt looks individual
+      for (const s of shards) {
+        s.dropletSpawnAt = rndInt(20, 80);
+        s.dropletSpawned = false;
+      }
       meltTimer  = 0;
       state      = 'melting';
     }
@@ -650,18 +664,52 @@ function update() {
 
     // Shrink shards toward zero
     for (const s of shards) {
-      s.scale = 1 - t;
+      s.scale = Math.max(0, 1 - t);
+
+      // Spawn a droplet when this shard's individual stagger timer fires
+      if (!s.dropletSpawned && meltTimer >= s.dropletSpawnAt && puddleData) {
+        s.dropletSpawned = true;
+        puddleData.droplets.push({
+          x: s.x, y: s.y,
+          startX: s.x, startY: s.y,
+          frame: 0,
+          maxFrames: 48,   // 0.8 seconds at 60 fps
+          radius: 8,
+          merged: false
+        });
+      }
     }
 
-    // Grow puddle and fade it in quickly
     if (puddleData) {
-      puddleData.alpha = Math.min(0.55, t * 2 * 0.55);
-      puddleData.rx   += 0.15;
-      puddleData.ry   += 0.04;
+      // Move each droplet toward puddle center; merge on arrival
+      for (const d of puddleData.droplets) {
+        if (d.merged) continue;
+        d.frame++;
+        const dt = Math.min(1, d.frame / d.maxFrames);
+        d.x      = d.startX + (puddleData.x - d.startX) * dt;
+        d.y      = d.startY + (puddleData.y - d.startY) * dt;
+        d.radius = 8 + dt * 4;   // grows from 8px to 12px during travel
+        if (dt >= 1) {
+          d.merged = true;
+          puddleData.targetRadius += 18;   // each shard contributes 18px to target radius
+        }
+      }
+      // Remove droplets that have merged into the main puddle
+      puddleData.droplets = puddleData.droplets.filter(d => !d.merged);
+
+      // Smoothly lerp puddle radius toward target at 0.08 per frame
+      puddleData.radius = lerp(puddleData.radius, puddleData.targetRadius, 0.08);
     }
 
-    if (meltTimer >= MELT_FRAMES) {
-      shards      = [];
+    // Transition only when shards are fully melted AND all droplets have merged
+    const shardsAllMelted = t >= 1;
+    const noDroplets      = !puddleData || puddleData.droplets.length === 0;
+    if (shardsAllMelted && noDroplets) {
+      shards = [];
+      if (puddleData) {
+        puddleData.peakRadius = puddleData.radius;
+        puddleData.droplets   = [];
+      }
       puddleTimer = 0;
       state       = 'puddle_fading';
     }
@@ -671,9 +719,12 @@ function update() {
   if (state === 'puddle_fading') {
     puddleTimer++;
     if (puddleData) {
-      puddleData.alpha = 0.55 * (1 - puddleTimer / PUDDLE_FRAMES);
+      const t = puddleTimer / PUDDLE_FADE_FRAMES;
+      // Shrink and fade simultaneously — radius to 60% of peak, opacity to 0
+      puddleData.radius = puddleData.peakRadius * (1 - t * 0.4);
+      puddleData.alpha  = 0.45 * (1 - t);
     }
-    if (puddleTimer >= PUDDLE_FRAMES) {
+    if (puddleTimer >= PUDDLE_FADE_FRAMES) {
       puddleData = null;
       spawnTimer = 0;
       state      = 'spawning';
@@ -862,22 +913,91 @@ function drawShard(s) {
   ctx.restore();
 }
 
+// ─── PUDDLE SYSTEM ────────────────────────────────────────────────────────────
+// Organic blob puddle with bezier-curved edges, sheen highlight, and per-shard
+// droplets that flow from each shard's melt position to the puddle center.
+// Blob shape is randomized once at spawn and never animated (edges are static).
+
+// Create 8 evenly-spaced blob anchor points with randomized radius factors (+/- 20%).
+function mkBlobPoints() {
+  const pts = [];
+  for (let i = 0; i < 8; i++) {
+    pts.push({
+      angle:  (i / 8) * Math.PI * 2,
+      factor: 0.8 + Math.random() * 0.4   // 80%–120% of base radius
+    });
+  }
+  return pts;
+}
+
+// Trace a smooth closed blob using Catmull-Rom-style cubic bezier curves.
+// rx = horizontal radius, ry = vertical radius (ry < rx makes a flat puddle).
+function drawBlobPath(cx, cy, rx, ry, blobPoints) {
+  const n = blobPoints.length;
+  const pts = blobPoints.map(p => ({
+    x: cx + Math.cos(p.angle) * rx * p.factor,
+    y: cy + Math.sin(p.angle) * ry * p.factor
+  }));
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 0; i < n; i++) {
+    const prev = pts[(i - 1 + n) % n];
+    const curr = pts[i];
+    const next = pts[(i + 1) % n];
+    const nn   = pts[(i + 2) % n];
+    // Catmull-Rom tangents converted to cubic bezier control points
+    const cp1x = curr.x + (next.x - prev.x) * 0.25;
+    const cp1y = curr.y + (next.y - prev.y) * 0.25;
+    const cp2x = next.x - (nn.x - curr.x) * 0.25;
+    const cp2y = next.y - (nn.y - curr.y) * 0.25;
+    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+  }
+  ctx.closePath();
+}
+
 function drawPuddle(pd) {
-  if (!pd || pd.alpha <= 0) return;
+  if (!pd || pd.radius <= 0.5 || pd.alpha <= 0) return;
+
+  // Flatten puddle vertically so it looks like water on a flat surface
+  const ry = pd.radius * 0.32;
+
   ctx.save();
-  // Main puddle ellipse
+
+  // Main puddle blob — light blue tint, semi-transparent
   ctx.globalAlpha = pd.alpha;
-  ctx.fillStyle = 'rgba(20, 35, 60, 0.8)';
-  ctx.beginPath();
-  ctx.ellipse(pd.x, pd.y, pd.rx, pd.ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle   = 'rgba(180, 210, 230, 1)';
+  drawBlobPath(pd.x, pd.y, pd.radius, ry, pd.blobPoints);
   ctx.fill();
-  // Wet sheen highlight
-  ctx.globalAlpha = pd.alpha * 0.4;
-  ctx.fillStyle = 'rgba(80, 130, 190, 0.5)';
+
+  // Sheen — small white ellipse, slightly above and left of center, opacity 0.35
+  ctx.globalAlpha = (pd.alpha / 0.45) * 0.35;   // scale with puddle so it fades together
+  ctx.fillStyle   = 'rgba(255, 255, 255, 1)';
   ctx.beginPath();
-  ctx.ellipse(pd.x - pd.rx * 0.15, pd.y - pd.ry * 0.2, pd.rx * 0.5, pd.ry * 0.45, -0.3, 0, Math.PI * 2);
+  ctx.ellipse(
+    pd.x - pd.radius * 0.18,   // slightly left of center
+    pd.y - ry * 0.35,           // slightly above center
+    pd.radius * 0.25,           // semi-major: 25% of puddle radius (= 25% of half-width)
+    ry * 0.45,                  // semi-minor: proportional to flattened height
+    -0.3,                       // slight tilt
+    0, Math.PI * 2
+  );
   ctx.fill();
+
   ctx.restore();
+
+  // Draw droplets traveling from shard positions toward the puddle center
+  if (pd.droplets) {
+    for (const d of pd.droplets) {
+      if (d.merged) continue;
+      ctx.save();
+      ctx.globalAlpha = 0.65;
+      ctx.fillStyle   = 'rgba(180, 210, 230, 1)';
+      ctx.beginPath();
+      ctx.ellipse(d.x, d.y, d.radius, d.radius * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
 }
 
 function drawSpawning() {
