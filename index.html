@@ -942,17 +942,43 @@ function drawBackground() {
 }
 
 function drawCounter() {
-  // Marble base
-  const grad = ctx.createLinearGradient(0, counterY, 0, H);
-  grad.addColorStop(0,   '#d6d4cf');
-  grad.addColorStop(0.2, '#e4e2de');
-  grad.addColorStop(0.6, '#d0cecc');
-  grad.addColorStop(1,   '#b8b6b3');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, counterY, W, H - counterY);
+  // ── Counter geometry — 3D overhead-perspective trapezoid ──────────────────
+  // Back edge (at the wall): 75 % of canvas width, centered.
+  // Front edge (near lip): full canvas width, leaving room for the slab face.
+  const FACE_H   = 18;                     // visible slab thickness below front edge
+  const SHADOW_H = 10;                     // drop-shadow height below the front face
+  const backW    = W * 0.75;
+  const backL    = (W - backW) / 2;        // x of left back corner
+  const backR    = backL + backW;           // x of right back corner
+  const frontY   = H - FACE_H - SHADOW_H;  // y of the front (near) edge of the surface
+  const backY    = counterY;                // y of the back (far) edge
 
-  // Veining
+  // ── Counter surface with overhead-perspective gradient ────────────────────
+  // Lighter toward the back edge (farther from viewer) to sell the 3D angle.
+  const surf = ctx.createLinearGradient(0, backY, 0, frontY);
+  surf.addColorStop(0,   '#dcdad6');
+  surf.addColorStop(0.2, '#e4e2de');
+  surf.addColorStop(0.6, '#d0cecc');
+  surf.addColorStop(1,   '#c4c2be');
+
+  ctx.beginPath();
+  ctx.moveTo(backL, backY);
+  ctx.lineTo(backR, backY);
+  ctx.lineTo(W,     frontY);
+  ctx.lineTo(0,     frontY);
+  ctx.closePath();
+  ctx.fillStyle = surf;
+  ctx.fill();
+
+  // ── Marble veining — clipped to the trapezoid surface ─────────────────────
   ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(backL, backY);
+  ctx.lineTo(backR, backY);
+  ctx.lineTo(W,     frontY);
+  ctx.lineTo(0,     frontY);
+  ctx.closePath();
+  ctx.clip();
   ctx.globalAlpha = 0.15;
   for (const v of veinPaths) {
     ctx.beginPath();
@@ -964,13 +990,46 @@ function drawCounter() {
   }
   ctx.restore();
 
-  // Top-edge highlight
-  const edge = ctx.createLinearGradient(0, counterY, 0, counterY + 8);
-  edge.addColorStop(0,   'rgba(255,255,255,0.65)');
-  edge.addColorStop(0.5, 'rgba(230,230,230,0.2)');
-  edge.addColorStop(1,   'rgba(200,200,200,0)');
-  ctx.fillStyle = edge;
-  ctx.fillRect(0, counterY, W, 8);
+  // ── Back-edge highlight (rim of counter where it meets the wall) ──────────
+  // Follows the back edge width of the trapezoid rather than the full canvas.
+  const edgeGrad = ctx.createLinearGradient(0, backY, 0, backY + 8);
+  edgeGrad.addColorStop(0,   'rgba(255,255,255,0.65)');
+  edgeGrad.addColorStop(0.5, 'rgba(230,230,230,0.2)');
+  edgeGrad.addColorStop(1,   'rgba(200,200,200,0)');
+  // Interpolate trapezoid edges 8 px below the back edge
+  const edgeRatio = 8 / (frontY - backY);
+  const edgeBotL  = backL * (1 - edgeRatio);   // left edge of trap at backY+8
+  const edgeBotR  = backR + backL * edgeRatio;  // right edge of trap at backY+8
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(backL,    backY);
+  ctx.lineTo(backR,    backY);
+  ctx.lineTo(edgeBotR, backY + 8);
+  ctx.lineTo(edgeBotL, backY + 8);
+  ctx.closePath();
+  ctx.fillStyle = edgeGrad;
+  ctx.fill();
+  ctx.restore();
+
+  // ── Front face (visible slab thickness) ───────────────────────────────────
+  // Noticeably darker than the surface to read as a vertical face.
+  ctx.fillStyle = '#9a9894';
+  ctx.fillRect(0, frontY, W, FACE_H);
+  // Subtle inner gradient adds depth to the face
+  const faceShade = ctx.createLinearGradient(0, frontY, 0, frontY + FACE_H);
+  faceShade.addColorStop(0,   'rgba(0,0,0,0.08)');
+  faceShade.addColorStop(0.5, 'rgba(0,0,0,0.02)');
+  faceShade.addColorStop(1,   'rgba(0,0,0,0.16)');
+  ctx.fillStyle = faceShade;
+  ctx.fillRect(0, frontY, W, FACE_H);
+
+  // ── Drop shadow below the front face ──────────────────────────────────────
+  const dropShadow = ctx.createLinearGradient(0, frontY + FACE_H, 0, H);
+  dropShadow.addColorStop(0,   'rgba(0,0,0,0.40)');
+  dropShadow.addColorStop(0.5, 'rgba(0,0,0,0.12)');
+  dropShadow.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle = dropShadow;
+  ctx.fillRect(0, frontY + FACE_H, W, SHADOW_H);
 }
 
 function drawIce(ic) {
