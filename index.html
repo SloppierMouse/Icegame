@@ -54,13 +54,12 @@ function rndInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
 function lerp(a, b, t){ return a + (b - a) * t; }
 
 // ─── Game state ───────────────────────────────────────────────────────────────
-// 'idle'          – ice resting on counter
-// 'held'          – ice following mouse
-// 'falling'       – ice falling with gravity after release
-// 'cracked'       – shards sliding
-// 'melting'       – shards shrinking, puddle growing
-// 'puddle_fading' – puddle fading out
-// 'spawning'      – new ice cube fading in
+// 'idle'     – ice resting on counter
+// 'held'     – ice following mouse
+// 'falling'  – ice falling with gravity after release
+// 'cracked'  – shards sliding
+// 'melting'  – shards shrinking, water particles spawning
+// 'spawning' – new ice cube fading in
 let state = 'idle';
 
 // ─── Cube counter (session-only, resets on page refresh) ──────────────────────
@@ -83,12 +82,8 @@ let shards = [];
 // { x, y, vx, vy, poly:[[rx,ry]…], alpha, scale, airborne, airVy, bounced, falling, fallVy }
 
 // MELT SEQUENCE variables
-let meltFrameTime  = 0;   // global frame counter used for shimmer sin() calculations
-const MELT_RATE    = 0.004;  // meltProgress increase per frame — raise to melt faster, lower to melt slower
-let puddleTimer    = 0;
-const PUDDLE_FADE_FRAMES = 72;  // 1.2 seconds at 60 fps — simultaneous shrink + fade
-let puddleData     = null;
-// puddleData = { x, y, radius, targetRadius, peakRadius, alpha, blobPoints }
+let meltFrameTime = 0;   // global frame counter used for melt calculations
+const MELT_RATE   = 0.004;  // meltProgress increase per frame
 
 // Spawning
 let spawnTimer = 0;
@@ -106,12 +101,11 @@ const CRACK_LENGTH_THRESHOLD = 200;  // or when their total pixel length exceeds
 // Mouse horizontal movement accelerates the swing; a spring-like restoring force
 // pulls the cube back toward hanging straight down (simulates gravity).
 // On release the spin carries into free-fall and decays at SPIN_DAMP each frame.
-const PENDULUM_MOUSE_ACCEL = 0.0008; // how strongly horizontal mouse movement accelerates the swing — raise for snappier response
-const PENDULUM_RESTORE     = 0.015;  // gravity-like restoring spring — pulls cube back to vertical; raise to resist swinging further
-const PENDULUM_DAMP        = 0.88;   // multiplies angular velocity each frame — lower value settles the swing faster
-const MAX_PENDULUM_ANGVEL  = 0.08;   // maximum angular velocity in radians per frame — prevents overly aggressive spin
+const PENDULUM_MOUSE_ACCEL = 0.0008; // how strongly horizontal mouse movement accelerates the swing
+const PENDULUM_RESTORE     = 0.015;  // gravity-like restoring spring — pulls cube back to vertical
+const PENDULUM_DAMP        = 0.88;   // multiplies angular velocity each frame
+const MAX_PENDULUM_ANGVEL  = 0.08;   // maximum angular velocity in radians per frame
 // Post-release spin damping: 0.97 per frame → ~16 % remaining after 60 frames (~1 s at 60 fps).
-// Tunable: lower value stops the spin faster, higher value lets it coast longer.
 const SPIN_DAMP            = 0.97;
 
 // Mouse / drag
@@ -126,7 +120,7 @@ let pendulumAngle       = 0;  // rod angle from downward vertical (0 = straight 
 let pendulumAngVel      = 0;  // angular velocity of pendulum (rad/frame)
 let pendulumAngleAtGrab = 0;  // pendulumAngle recorded at moment of grab
 let cubeAngleAtGrab     = 0;  // ice.angle recorded at moment of grab
-let lastMouseX          = 0;  // mouse X from the previous frame — used to compute horizontal movement delta
+let lastMouseX          = 0;  // mouse X from the previous frame
 
 // For velocity estimation on release — records the last N animation-frame
 // mouse positions while the cube is held, so we can compute a throw velocity.
@@ -141,7 +135,6 @@ canvas.addEventListener('mousedown', e => {
   mouse.down = true;
   if (state === 'idle' && ice && hitBox(mouse.x, mouse.y, ice.x, ice.y, ICE_W, ICE_H)) {
     // Compute the pendulum rod: vector from grab point (mouse) to cube center.
-    // The rod length and initial angle define the entire pendulum for this drag.
     const rodX          = ice.x - mouse.x;
     const rodY          = ice.y - mouse.y;
     pendulumLen         = Math.sqrt(rodX * rodX + rodY * rodY);
@@ -171,18 +164,14 @@ canvas.addEventListener('mouseup', () => {
     releaseDrop();
   }
   // When releasing a dragged shard above the counter, re-enter the fall loop.
-  // Without this, a shard grabbed from the counter (airborne = false) would
-  // immediately snap back to counterY via the sliding code on the next frame.
   if (state === 'cracked' && drag && drag.type === 'shard') {
     const s = shards[drag.idx];
     if (s) {
       const floor = counterY - 10;
       if (s.y < floor - 5) {
-        // Shard is in the air — inherit velocity from drag and fall naturally
         s.airborne = true;
-        s.airVy    = s.vy; // s.vy was updated each drag frame: ty - s.y (px/frame)
+        s.airVy    = s.vy;
       } else {
-        // Shard is at/near the counter — settle it flat so sliding code takes over
         s.y = floor;
       }
     }
@@ -211,7 +200,6 @@ function hitPoly(lx, ly, poly) {
 // ─── Crack helpers ────────────────────────────────────────────────────────────
 
 // Sum the pixel length of every crack line currently stored on the ice cube.
-// Used to decide whether accumulated damage has crossed the break threshold.
 function totalCrackLength(cracks) {
   let total = 0;
   for (const [x0, y0, x1, y1] of cracks) {
@@ -222,7 +210,6 @@ function totalCrackLength(cracks) {
 }
 
 // Generate `count` random crack lines radiating outward from the ice centre.
-// Each line starts a few pixels from the centre and extends minLen–maxLen px.
 function makeCrackLines(count, minLen, maxLen) {
   const lines = [];
   for (let i = 0; i < count; i++) {
@@ -237,6 +224,274 @@ function makeCrackLines(count, minLen, maxLen) {
   }
   return lines;
 }
+
+// ─── WATER SYSTEM ─────────────────────────────────────────────────────────────
+// Metaball-based water replaces the old static puddle.  Each melting shard
+// spawns water particles that drift together under surface tension, then
+// slowly evaporate — edge particles (few neighbours) first, centre last.
+//
+// Rendering uses two offscreen canvases:
+//   waterBlobCanvas — white flat ellipses, one per particle
+//   waterMaskCanvas — blob canvas run through CSS blur+contrast to threshold
+//                     overlapping circles into organic merged blobs, then
+//                     source-in filled with translucent blue
+// This keeps the threshold math off the GPU raster path and out of the main loop.
+
+const MAX_WATER_PARTICLES = 200;   // hard cap; new spawns are skipped when full
+const WATER_EVAP_FRAMES   = 480;   // ~8 s at 60 fps for a fully isolated particle
+const WATER_GRAVITY       = 0.025; // downward acceleration per frame (very slow)
+const WATER_FRICTION      = 0.92;  // velocity multiplier per frame (damps motion)
+const TENSION_RADIUS      = 75;    // px — attraction acts within this distance
+const TENSION_FORCE       = 0.035; // acceleration toward neighbour per frame
+const TENSION_MIN_DIST    = 16;    // px — prevents two particles collapsing to one point
+const NEIGHBOR_RADIUS     = 55;    // px — counts neighbours for evaporation rate
+const WATER_BLUR_PX       = 14;    // CSS blur radius; larger = more blob merging
+
+// waterParticles: { x, y, vx, vy, radius, baseRadius, neighborCount, evaporating }
+let waterParticles  = [];
+// waterRipples: { x, y, radius, maxRadius, age, maxAge } — expanding rings on shard landing
+let waterRipples    = [];
+// waterDroplets: { x, y, vx, vy, radius } — airborne splash arcs that settle as particles
+let waterDroplets   = [];
+// true once the current melt batch finishes — new settled droplets start evaporating immediately
+let waterEvapActive = false;
+
+// Two offscreen canvases allocated once, resized on window resize
+let waterBlobCanvas = null, waterBlobCtx = null;
+let waterMaskCanvas = null, waterMaskCtx = null;
+
+function initWaterCanvases() {
+  waterBlobCanvas = document.createElement('canvas');
+  waterBlobCanvas.width  = W; waterBlobCanvas.height = H;
+  waterBlobCtx = waterBlobCanvas.getContext('2d');
+
+  waterMaskCanvas = document.createElement('canvas');
+  waterMaskCanvas.width  = W; waterMaskCanvas.height = H;
+  waterMaskCtx = waterMaskCanvas.getContext('2d');
+}
+initWaterCanvases();
+
+// Keep offscreen canvases in sync with the main canvas on resize
+window.addEventListener('resize', () => {
+  if (waterBlobCanvas) { waterBlobCanvas.width = W; waterBlobCanvas.height = H; }
+  if (waterMaskCanvas) { waterMaskCanvas.width = W; waterMaskCanvas.height = H; }
+});
+
+// Add one water particle; silently skips if the cap is already reached.
+function spawnWaterParticle(x, y, radius, vx, vy) {
+  if (waterParticles.length >= MAX_WATER_PARTICLES) return;
+  waterParticles.push({
+    x, y,
+    vx: vx || 0,
+    vy: vy || 0,
+    radius,
+    baseRadius: radius,
+    neighborCount: 0,
+    evaporating: waterEvapActive   // inherits current evap state at spawn time
+  });
+}
+
+// Called when melt completes — marks all particles evaporating and gates future spawns.
+function startWaterEvaporation() {
+  waterEvapActive = true;
+  for (const p of waterParticles) p.evaporating = true;
+}
+
+// True if any particle is within `dist` px of (x, y) — used for ripple / splash checks.
+function hasWaterNear(x, y, dist) {
+  const d2 = dist * dist;
+  for (const p of waterParticles) {
+    const dx = p.x - x, dy = p.y - y;
+    if (dx * dx + dy * dy < d2) return true;
+  }
+  return false;
+}
+
+// Spawn 2–3 staggered expanding rings at (x, y) — called when a shard lands in water.
+function spawnRipple(x, y) {
+  const count = rndInt(2, 3);
+  for (let i = 0; i < count; i++) {
+    waterRipples.push({
+      x, y,
+      radius:    5  + i * 10,
+      maxRadius: 50 + i * 25,
+      age:       i * 5,   // stagger so rings don't all start at the same size
+      maxAge:    30        // ~0.5 s at 60 fps
+    });
+  }
+}
+
+// Scatter 5–8 fast droplets from (x, y) — called when a cube impacts existing water.
+function spawnSplash(x, y) {
+  const count = rndInt(5, 8);
+  for (let i = 0; i < count; i++) {
+    const angle = rnd(0, Math.PI * 2);
+    const speed = rnd(2.5, 6);
+    waterDroplets.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - rnd(2, 5),  // upward arc component
+      radius: rnd(4, 9)
+    });
+  }
+}
+
+// Recount neighbours for all particles (O(n²), acceptable for n ≤ 200).
+function countWaterNeighbors() {
+  for (let i = 0; i < waterParticles.length; i++) waterParticles[i].neighborCount = 0;
+  for (let i = 0; i < waterParticles.length; i++) {
+    for (let j = i + 1; j < waterParticles.length; j++) {
+      const dx = waterParticles[j].x - waterParticles[i].x;
+      const dy = waterParticles[j].y - waterParticles[i].y;
+      if (dx * dx + dy * dy < NEIGHBOR_RADIUS * NEIGHBOR_RADIUS) {
+        waterParticles[i].neighborCount++;
+        waterParticles[j].neighborCount++;
+      }
+    }
+  }
+}
+
+// Physics + evaporation tick — called every frame regardless of game state.
+function updateWater() {
+  if (waterParticles.length === 0 && waterRipples.length === 0 && waterDroplets.length === 0) return;
+
+  // Neighbour counts drive both surface-tension strength and evaporation rate
+  countWaterNeighbors();
+
+  // Surface tension: short-range attraction that clumps particles without collapsing them
+  for (let i = 0; i < waterParticles.length; i++) {
+    for (let j = i + 1; j < waterParticles.length; j++) {
+      const pi = waterParticles[i], pj = waterParticles[j];
+      const dx = pj.x - pi.x, dy = pj.y - pi.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < TENSION_RADIUS * TENSION_RADIUS && d2 > TENSION_MIN_DIST * TENSION_MIN_DIST) {
+        const d  = Math.sqrt(d2);
+        const f  = TENSION_FORCE / d;  // weaker with distance
+        pi.vx += dx * f;  pi.vy += dy * f;
+        pj.vx -= dx * f;  pj.vy -= dy * f;
+      }
+    }
+  }
+
+  // Integrate each particle: gravity, movement, friction, floor, evaporation
+  for (let i = waterParticles.length - 1; i >= 0; i--) {
+    const p = waterParticles[i];
+
+    p.vy += WATER_GRAVITY;
+    p.x  += p.vx;
+    p.y  += p.vy;
+    p.vx *= WATER_FRICTION;
+    p.vy *= WATER_FRICTION;
+
+    // Pool on counter surface
+    if (p.y > counterY) { p.y = counterY; p.vy = 0; }
+    // Clamp to canvas edges horizontally
+    if (p.x < 0) { p.x = 0; p.vx = 0; }
+    if (p.x > W) { p.x = W; p.vx = 0; }
+
+    // Edge particles (few neighbours) evaporate fast; dense centre particles evaporate slowly.
+    // The denominator raises with neighbour count so central particles survive far longer.
+    if (p.evaporating) {
+      const evapRate = (p.baseRadius / WATER_EVAP_FRAMES) / (1 + p.neighborCount * 0.45);
+      p.radius -= evapRate;
+      if (p.radius <= 0) { waterParticles.splice(i, 1); continue; }
+    }
+  }
+
+  // Advance ripple rings toward their max radius, then remove when their lifetime ends
+  for (let i = waterRipples.length - 1; i >= 0; i--) {
+    const r = waterRipples[i];
+    r.age++;
+    r.radius += (r.maxRadius - r.radius) * 0.12;  // eases toward maxRadius
+    if (r.age >= r.maxAge) waterRipples.splice(i, 1);
+  }
+
+  // Airborne splash droplets arc under gravity and become water particles on landing
+  for (let i = waterDroplets.length - 1; i >= 0; i--) {
+    const d = waterDroplets[i];
+    d.vy += 0.45;   // droplet gravity (faster than water particles — they're airborne)
+    d.x  += d.vx;
+    d.y  += d.vy;
+    d.vx *= 0.98;
+
+    if (d.y >= counterY) {
+      // Settled — convert to a resting water particle with slight horizontal carry
+      spawnWaterParticle(d.x, counterY, d.radius, d.vx * 0.3, 0);
+      waterDroplets.splice(i, 1);
+    } else if (d.x < -60 || d.x > W + 60) {
+      waterDroplets.splice(i, 1);  // flew off screen
+    }
+  }
+}
+
+// Draw all water onto the main canvas using the blur+contrast metaball technique.
+// Called once per frame after drawCounter() so water appears on the marble surface.
+function renderWater() {
+  const hasParticles = waterParticles.length > 0;
+  const hasRipples   = waterRipples.length   > 0;
+  const hasDroplets  = waterDroplets.length  > 0;
+  if (!hasParticles && !hasRipples && !hasDroplets) return;
+
+  if (hasParticles) {
+    // Step 1 — draw each particle as a flat white ellipse on the blob canvas.
+    // Wide (×1.5) and short (×0.5) gives water the surface-pooling look.
+    waterBlobCtx.clearRect(0, 0, W, H);
+    waterBlobCtx.fillStyle = 'white';
+    for (const p of waterParticles) {
+      waterBlobCtx.beginPath();
+      waterBlobCtx.ellipse(p.x, p.y, p.radius * 1.5, p.radius * 0.5, 0, 0, Math.PI * 2);
+      waterBlobCtx.fill();
+    }
+
+    // Step 2 — draw the blob canvas onto the mask canvas with blur + high contrast.
+    // blur() softens the ellipse edges so nearby circles overlap.
+    // contrast(20) then pushes the blended region past the ~50% alpha threshold,
+    // snapping overlapping areas to fully opaque — the classic metaball trick.
+    waterMaskCtx.clearRect(0, 0, W, H);
+    waterMaskCtx.filter = `blur(${WATER_BLUR_PX}px) contrast(20)`;
+    waterMaskCtx.drawImage(waterBlobCanvas, 0, 0);
+    waterMaskCtx.filter = 'none';
+
+    // Step 3 — colorize: source-in fills only where the thresholded blobs have alpha.
+    // Result: translucent blue water blobs, thicker (more opaque) where particles overlap.
+    waterMaskCtx.globalCompositeOperation = 'source-in';
+    waterMaskCtx.fillStyle = 'rgba(100, 168, 220, 0.68)';
+    waterMaskCtx.fillRect(0, 0, W, H);
+    waterMaskCtx.globalCompositeOperation = 'source-over';
+
+    // Step 4 — blit the coloured blobs onto the main canvas
+    ctx.drawImage(waterMaskCanvas, 0, 0);
+  }
+
+  // Draw airborne splash droplets as small blue dots (they're tiny and fast)
+  if (hasDroplets) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(100, 168, 220, 0.75)';
+    for (const d of waterDroplets) {
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, Math.max(1, d.radius * 0.55), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Draw ripple rings as flat ellipses that expand and fade over ~0.5 s
+  if (hasRipples) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(160, 210, 245, 1)';
+    ctx.lineWidth   = 1.5;
+    for (const r of waterRipples) {
+      const progress  = r.age / r.maxAge;
+      ctx.globalAlpha = (1 - progress) * 0.55;
+      ctx.beginPath();
+      // Flat ellipse matches the water pool shape
+      ctx.ellipse(r.x, r.y, r.radius * 1.5, r.radius * 0.5, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+// ─── END WATER SYSTEM ─────────────────────────────────────────────────────────
 
 // ─── Drop / crack logic ───────────────────────────────────────────────────────
 function releaseDrop() {
@@ -255,48 +510,46 @@ function releaseDrop() {
   }
 
   // ── Compute throw velocity from mouse history ────────────────────────────
-  // Average the displacement across the sampled frames to get px-per-frame.
   let throwVx = 0, throwVy = 0;
   if (mouseHistory.length >= 2) {
     const oldest = mouseHistory[0];
     const newest = mouseHistory[mouseHistory.length - 1];
-    const frames = mouseHistory.length - 1; // number of intervals between samples
+    const frames = mouseHistory.length - 1;
     throwVx = (newest.x - oldest.x) / frames;
     throwVy = (newest.y - oldest.y) / frames;
   }
 
-  // Add tangential velocity from pendulum swing: cube on a swinging rod inherits
-  // speed at its end of the rod even if the mouse (pivot) was nearly stationary.
+  // Add tangential velocity from pendulum swing
   throwVx +=  pendulumAngVel * pendulumLen * Math.cos(pendulumAngle);
   throwVy -= pendulumAngVel * pendulumLen * Math.sin(pendulumAngle);
 
-  // Cap velocity so the cube can never leave the screen in one frame.
-  // Horizontal max: 15 px/frame, vertical max: 20 px/frame (upward = negative).
+  // Cap velocity so the cube can never leave the screen in one frame
   throwVx = Math.max(-15, Math.min(15,  throwVx));
   throwVy = Math.max(-20, Math.min(20,  throwVy));
 
-  // Apply throw velocity; gravity takes over from here.
-  // Angular velocity from the drag carries into the fall — do NOT reset it here.
   ice.vx = throwVx;
   ice.vy = throwVy;
 
-  mouseHistory = []; // Done with this throw — clear for next drag
+  mouseHistory = [];
   state = 'falling';
 }
 
 // Called when the falling ice cube hits the counter.
-// Each impact ADDS new crack lines on top of the existing ones — cracks are
-// never cleared between drops.  The cube only shatters once the total number
-// of crack lines OR their combined pixel length crosses a threshold.
+// Each impact ADDS new crack lines — cracks are never cleared between drops.
 function impactCrack(impactVy) {
   const cx = ice.x;
   const cy = counterY - ICE_H / 2;
 
+  // Splash effect: cube landing into existing water scatters droplets outward
+  if (hasWaterNear(cx, counterY, 120)) {
+    spawnSplash(cx, counterY);
+  }
+
   if (impactVy < 6) {
-    // Very slow tap — settle quietly with no new crack; preserve horizontal velocity so cube can slide
+    // Very slow tap — settle quietly with no new crack
     ice.y  = cy;
     ice.vy = 0;
-    ice.angle      = 0;  // snap flat when resting on counter
+    ice.angle      = 0;
     ice.angularVel = 0;
     state  = 'idle';
     return;
@@ -305,17 +558,13 @@ function impactCrack(impactVy) {
   // ── Add new crack lines based on how hard the drop was ──────────────────
   let newCracks;
   if (impactVy < 12) {
-    // Low-velocity drop — 1–2 short surface cracks
     newCracks = makeCrackLines(rndInt(1, 2), 15, 40);
   } else if (impactVy < 20) {
-    // Medium-velocity drop — 2–4 longer cracks
     newCracks = makeCrackLines(rndInt(2, 4), 35, 65);
   } else {
-    // High-velocity drop — 4–6 deep, long cracks
     newCracks = makeCrackLines(rndInt(4, 6), 50, 85);
   }
 
-  // Accumulate onto existing cracks — NEVER wipe them between drops
   for (const crack of newCracks) {
     ice.cracks.push(crack);
   }
@@ -327,38 +576,31 @@ function impactCrack(impactVy) {
                    || crackLength >= CRACK_LENGTH_THRESHOLD;
 
   if (shouldBreak) {
-    // Shatter — severity (shard count + spread) based on velocity of final blow
     if (impactVy >= 15) {
-      shards = genShards(cx, cy, rndInt(8, 14), 2.5);  // many small shards
+      shards = genShards(cx, cy, rndInt(8, 14), 2.5);
     } else {
-      shards = genShards(cx, cy, rndInt(4, 6), 1.0);   // fewer larger chunks
+      shards = genShards(cx, cy, rndInt(4, 6), 1.0);
     }
-    // Destroy the ice object — accumulated cracks go with it.
-    // mkIce() (which resets cracks to []) is only called at the END of the
-    // full shatter → melt → puddle → spawn sequence, never before.
     ice   = null;
     state = 'cracked';
   } else {
-    // Cube survives this drop — settle onto counter; preserve horizontal velocity so cube can slide
     ice.y  = cy;
     ice.vy = 0;
-    ice.angle      = 0;  // snap flat when resting on counter
+    ice.angle      = 0;
     ice.angularVel = 0;
     state  = 'idle';
   }
 }
 
 // Generate polygonal shards from an ice rect centred at (cx, cy)
-// Returns array of shard objects
 function genShards(cx, cy, count, spread) {
   const hw = ICE_W / 2, hh = ICE_H / 2;
 
-  // Random angles for radial slicing
   const angles = [];
   for (let i = 0; i < count; i++) angles.push(rnd(0, Math.PI * 2));
   angles.sort((a, b) => a - b);
 
-  const R = Math.sqrt(hw * hw + hh * hh) * 1.5;   // large enough to cover corners
+  const R = Math.sqrt(hw * hw + hh * hh) * 1.5;
   const result = [];
 
   for (let i = 0; i < count; i++) {
@@ -366,7 +608,6 @@ function genShards(cx, cy, count, spread) {
     const a1 = angles[(i + 1) % count];
     const amid = (a0 + a1) / 2;
 
-    // Sector polygon (world space, centred at cx,cy temporarily)
     const sector = [
       [0, 0],
       [Math.cos(a0)   * R, Math.sin(a0)   * R],
@@ -374,24 +615,18 @@ function genShards(cx, cy, count, spread) {
       [Math.cos(a1)   * R, Math.sin(a1)   * R]
     ];
 
-    // Clip to ice rect (in local space, so rect is [-hw,hw] x [-hh,hh])
     const clipped = clipToRect(sector, -hw, -hh, hw, hh);
     if (!clipped || clipped.length < 3) continue;
 
-    // Centroid of clipped shard (local to ice)
     let scx = 0, scy = 0;
     for (const [px, py] of clipped) { scx += px; scy += py; }
     scx /= clipped.length; scy /= clipped.length;
 
-    // World position of shard center
     const wx = cx + scx, wy = cy + scy;
-
-    // Poly in LOCAL coords (relative to shard center)
     const localPoly = clipped.map(([px, py]) => [px - scx, py - scy]);
 
-    // Random horizontal velocity at spawn; high drops also get an upward pop
     const vx    = rnd(-4, 4);
-    const airVy = spread > 1.5 ? rnd(-4, -1.5) : 0;  // upward pop for high drops
+    const airVy = spread > 1.5 ? rnd(-4, -1.5) : 0;
 
     result.push({
       x: wx, y: wy,
@@ -399,7 +634,7 @@ function genShards(cx, cy, count, spread) {
       poly: localPoly,
       alpha: 1,
       scale: 1,
-      airborne: true,   // always apply gravity from frame one — no teleporting to counter
+      airborne: true,
       airVy,
       bounced: false,
       falling: false,
@@ -435,6 +670,9 @@ function clipToRect(poly, x0, y0, x1, y1) {
 
 // ─── Update ───────────────────────────────────────────────────────────────────
 function update() {
+  // Water physics runs every frame so water persists across all game states
+  updateWater();
+
   // ── idle ──
   if (state === 'idle') {
     if (!ice) { ice = mkIce(); }
@@ -451,68 +689,51 @@ function update() {
   // ── held ──
   if (state === 'held' && ice) {
     // Record mouse position once per animation frame for velocity estimation.
-    // Using per-frame sampling (rather than mousemove events) gives consistent
-    // px-per-frame units that match the physics update rate.
     mouseHistory.push({ x: mouse.x, y: mouse.y });
     if (mouseHistory.length > VELOCITY_SAMPLE_COUNT) {
-      mouseHistory.shift(); // Drop oldest — keep only the most recent N frames
+      mouseHistory.shift();
     }
 
     // ── Pendulum physics: mouse horizontal movement drives the swing ──
-    // Each frame: measure how far the mouse moved sideways, convert to angular
-    // acceleration, apply a gravity-like restoring force, then integrate.
     if (pendulumLen > 1) {
-      // How far the mouse moved sideways since last frame — this drives the swing
       const deltaMouseX = mouse.x - lastMouseX;
-
-      // Angular acceleration from two sources combined:
-      let angularAccel  = deltaMouseX * PENDULUM_MOUSE_ACCEL; // mouse input swings the cube
-      angularAccel     -= pendulumAngle * PENDULUM_RESTORE;   // restoring force pulls back toward vertical (angle = 0)
-
+      let angularAccel  = deltaMouseX * PENDULUM_MOUSE_ACCEL;
+      angularAccel     -= pendulumAngle * PENDULUM_RESTORE;
       pendulumAngVel += angularAccel;
-      pendulumAngVel *= PENDULUM_DAMP;  // damping — swing settles, never spins forever
-      // Clamp angular velocity so the cube never spins too aggressively
+      pendulumAngVel *= PENDULUM_DAMP;
       pendulumAngVel = Math.max(-MAX_PENDULUM_ANGVEL, Math.min(MAX_PENDULUM_ANGVEL, pendulumAngVel));
       pendulumAngle  += pendulumAngVel;
     }
-    // Always update lastMouseX so the next frame's delta reflects only this frame's movement
     lastMouseX = mouse.x;
 
-    // Cube center position is fully determined by the pendulum rod
     const targetX  = mouse.x + pendulumLen * Math.sin(pendulumAngle);
     const targetY  = mouse.y + pendulumLen * Math.cos(pendulumAngle);
     const onCounter = ice.y >= counterY - ICE_H / 2 - 2;
-    const prevIceY  = ice.y; // capture Y before update to measure actual speed this frame
+    const prevIceY  = ice.y;
 
     if (onCounter && targetY > counterY - ICE_H / 2 - 15) {
-      // Still on counter — slide smoothly, no pendulum lift yet
       const slideX = Math.max(ICE_W / 2, Math.min(W - ICE_W / 2, targetX));
       ice.x += (slideX - ice.x) * 0.22;
       ice.y  = counterY - ICE_H / 2;
     } else {
-      // In the air — position is fully driven by pendulum physics
       ice.x = targetX;
       ice.y = targetY;
     }
 
-    // Cube body rotates with the pendulum so the grab corner stays at the pivot.
-    // When pendulumAngle decreases, ice.angle increases by the same amount (opposite sign).
     ice.angle      = cubeAngleAtGrab - (pendulumAngle - pendulumAngleAtGrab);
-    ice.angularVel = -pendulumAngVel; // kept in sync so release inherits correct spin
+    ice.angularVel = -pendulumAngVel;
 
     // ── Smash detection: slam the cube into the counter while still holding ──
-    // If the cube crosses the counter surface this frame while being dragged
-    // downward fast enough, trigger the same shatter as a high-velocity drop.
     const restY      = counterY - ICE_H / 2;
-    const iceFrameVy = ice.y - prevIceY; // actual downward speed of the cube this frame
-    // smash threshold: 12px/frame — easy to tune
+    const iceFrameVy = ice.y - prevIceY;
     if (ice.y >= restY && iceFrameVy > 12) {
       const smashX = ice.x;
-      ice.y  = restY; // snap flush with counter before shattering
-      shards = genShards(smashX, restY, rndInt(8, 14), 2.5); // same as high-velocity drop
+      ice.y = restY;
+      // Trigger water splash if smashing into existing water
+      if (hasWaterNear(smashX, counterY, 120)) spawnSplash(smashX, counterY);
+      shards = genShards(smashX, restY, rndInt(8, 14), 2.5);
       ice    = null;
       state  = 'cracked';
-      // Mouse releases automatically — clear drag state so input is clean
       drag   = null;
       canvas.style.cursor = 'default';
       mouseHistory = [];
@@ -524,33 +745,16 @@ function update() {
     ice.vy += 0.6;   // gravity = 0.6px per frame squared
     ice.x  += ice.vx;
     ice.y  += ice.vy;
-    ice.vx *= 0.99;  // light air resistance on horizontal movement
+    ice.vx *= 0.99;
 
-    // ── Angular velocity after release — spin carries, then fades out ────────
-    // Gravity built angular velocity while the cube was held (pendulum physics).
-    // That spin carries into free-fall and decays by SPIN_DAMP each frame, so
-    // it feels physical: the cube rotates visibly for ~1 second then settles.
+    // Angular velocity after release — spin carries, then fades out
     ice.angle      += ice.angularVel;
     ice.angularVel *= SPIN_DAMP;
 
-    // ── Wall bouncing (left/right) with 0.5 dampening ───────────────────────
-    // The cube bounces off each wall and loses half its horizontal speed.
-    if (ice.x - ICE_W / 2 < 0) {
-      ice.x  = ICE_W / 2;          // push back inside left wall
-      ice.vx = -ice.vx * 0.5;      // reverse and halve horizontal velocity
-    }
-    if (ice.x + ICE_W / 2 > W) {
-      ice.x  = W - ICE_W / 2;      // push back inside right wall
-      ice.vx = -ice.vx * 0.5;      // reverse and halve horizontal velocity
-    }
-
-    // ── Top of screen constraint ─────────────────────────────────────────────
-    // If the cube was thrown upward and reaches the top edge, stop it there.
-    // Gravity then pulls it straight back down.
-    if (ice.y - ICE_H / 2 < 0) {
-      ice.y  = ICE_H / 2;
-      ice.vy = 0; // cancel upward momentum; gravity takes over immediately
-    }
+    // Wall bouncing (left/right) with 0.5 dampening
+    if (ice.x - ICE_W / 2 < 0) { ice.x  = ICE_W / 2;       ice.vx = -ice.vx * 0.5; }
+    if (ice.x + ICE_W / 2 > W) { ice.x  = W - ICE_W / 2;   ice.vx = -ice.vx * 0.5; }
+    if (ice.y - ICE_H / 2 < 0) { ice.y  = ICE_H / 2;        ice.vy = 0; }
 
     // TODO: ground collision uses bounding box, may clip when rotated
     const restY = counterY - ICE_H / 2;
@@ -592,21 +796,21 @@ function update() {
 
       if (s.airborne) {
         // High-drop bounce arc
-        s.airVy += 0.55;   // gravity
+        s.airVy += 0.55;
         s.x     += s.vx;
         s.y     += s.airVy;
         s.vx    *= 0.98;
 
-        const floor = counterY - 10; // approximate shard half-height
+        const floor = counterY - 10;
         if (s.y >= floor) {
           s.y        = floor;
           s.airborne = false;
           s.airVy    = 0;
-          // horizontal friction after bounce + random spread on landing
           s.vx      *= 0.6;
           s.vx      += rnd(-1.0, 1.0);
+          // Ripple effect when a shard lands on existing water
+          if (hasWaterNear(s.x, counterY, 80)) spawnRipple(s.x, counterY);
         }
-        // Check edge fall
         if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
         continue;
       }
@@ -614,9 +818,8 @@ function update() {
       // Sliding on counter — reduced friction (wet ice on smooth marble)
       s.vx *= 0.985;
       s.x  += s.vx;
-      s.y   = counterY - 10;   // keep on counter
+      s.y   = counterY - 10;
 
-      // Edge fall-off
       if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
     }
 
@@ -625,30 +828,18 @@ function update() {
     if (groundedShards.length > 0 &&
         groundedShards.every(s => !s.airborne && Math.abs(s.vx) < 0.15)) {
 
-      // MELT SEQUENCE — initialize per-shard melt and main puddle
       shards = groundedShards.slice();
 
-      // Each shard gets its own melt progress and a small blob puddle beneath it
-      for (const s of shards) {
-        s.meltProgress       = 0;      // 0.0 = frozen, 1.0 = fully melted
-        s.meltWidthScale     = 1;
-        s.meltHeightScale    = 1;
-        s.dropletBlobPoints  = mkBlobPoints(6);  // 6-point organic blob centered under this shard
-      }
+      // Reset evap gate so particles spawned during this melt don't evaporate yet
+      waterEvapActive = false;
 
-      // Main puddle spawns immediately at radius 0, centered at the shard cluster centroid
-      let px = 0, py = 0;
-      for (const s of shards) { px += s.x; py += s.y; }
-      px /= shards.length;
-      py /= shards.length;
-      puddleData = {
-        x: px, y: py,
-        radius: 0,          // starts at zero — grows with melt progress
-        targetRadius: 0,
-        peakRadius: 0,
-        alpha: 0.45,
-        blobPoints: mkBlobPoints(8)
-      };
+      // Initialise each shard for the melt animation
+      for (const s of shards) {
+        s.meltProgress    = 0;      // 0.0 = frozen, 1.0 = fully melted
+        s.meltWidthScale  = 1;
+        s.meltHeightScale = 1;
+        s.waterSpawned    = false;  // whether this shard has released its water particles
+      }
 
       meltFrameTime = 0;
       state         = 'melting';
@@ -666,14 +857,10 @@ function update() {
   if (state === 'melting') {
     meltFrameTime++;
 
-    // Advance each shard's melt progress and compute its non-uniform draw scale
     for (const s of shards) {
       s.meltProgress = Math.min(1, s.meltProgress + MELT_RATE);  // 0.0 → 1.0
 
       // Height shrinks faster than width — ice flattens before it disappears
-      //   meltProgress 0.0 → width 100%, height 100%
-      //   meltProgress 0.5 → width  85%, height  40%  (flat wet slick)
-      //   meltProgress 1.0 → width   0%, height   0%  (fully gone)
       const mp = s.meltProgress;
       if (mp <= 0.5) {
         s.meltWidthScale  = lerp(1.0, 0.85, mp * 2);
@@ -683,63 +870,31 @@ function update() {
         s.meltHeightScale = lerp(0.40, 0, (mp - 0.5) * 2);
       }
 
-      // Opacity fades slightly — stays mostly visible until scale collapses to zero
+      // Opacity fades as shard collapses
       s.alpha = 1 - (mp * 0.8);
 
-      // Shimmer per-shard droplet blob — each point oscillates independently on sin curve
-      for (let i = 0; i < s.dropletBlobPoints.length; i++) {
-        const pt = s.dropletBlobPoints[i];
-        pt.factor = pt.baseFactor + Math.sin(meltFrameTime * 0.08 + i) * 0.02;
+      // Spawn water particles when each shard is halfway melted —
+      // particles appear as the shard is still visibly shrinking
+      if (!s.waterSpawned && s.meltProgress >= 0.5) {
+        const count = rndInt(2, 4);
+        for (let k = 0; k < count; k++) {
+          spawnWaterParticle(
+            s.x + rnd(-18, 18),
+            counterY + rnd(-4, 4),
+            rnd(14, 22)
+          );
+        }
+        s.waterSpawned = true;
       }
     }
 
-    if (puddleData) {
-      // Main puddle target = sum of every shard's melt contribution (18px each at full melt)
-      let totalTarget = 0;
-      for (const s of shards) totalTarget += s.meltProgress * 18;
-      puddleData.targetRadius = totalTarget;
-
-      // Lerp actual radius toward target at 0.06 per frame — puddle grows in real time
-      puddleData.radius = lerp(puddleData.radius, puddleData.targetRadius, 0.06);
-
-      // Shimmer main puddle blob points — each point uses sin(time + index) so motion is
-      // smooth and staggered, not all points jumping together
-      for (let i = 0; i < puddleData.blobPoints.length; i++) {
-        const pt = puddleData.blobPoints[i];
-        pt.factor = pt.baseFactor + Math.sin(meltFrameTime * 0.08 + i) * 0.02;
-      }
-    }
-
-    // Once every shard has fully melted, transition to puddle fade-out
+    // Once every shard has fully melted, start evaporation and transition to spawning.
+    // Water particles are now independent and persist across the next cube's life.
     if (shards.every(s => s.meltProgress >= 1)) {
       shards = [];
-      if (puddleData) puddleData.peakRadius = puddleData.radius;
-      puddleTimer = 0;
-      state       = 'puddle_fading';
-    }
-  }
-
-  // MELT SEQUENCE
-  // ── puddle fading ──
-  if (state === 'puddle_fading') {
-    puddleTimer++;
-    if (puddleData) {
-      const t = puddleTimer / PUDDLE_FADE_FRAMES;
-      // Shrink to 50% radius and fade to opacity 0 simultaneously over 1.2 seconds
-      puddleData.radius = puddleData.peakRadius * (1 - t * 0.5);
-      puddleData.alpha  = 0.45 * (1 - t);
-
-      // Continue shimmering the edge during fade
-      meltFrameTime++;
-      for (let i = 0; i < puddleData.blobPoints.length; i++) {
-        const pt = puddleData.blobPoints[i];
-        pt.factor = pt.baseFactor + Math.sin(meltFrameTime * 0.08 + i) * 0.02;
-      }
-    }
-    if (puddleTimer >= PUDDLE_FADE_FRAMES) {
-      puddleData = null;
+      startWaterEvaporation();  // begins the 8-second shrink-from-edges evaporation
       spawnTimer = 0;
-      state      = 'spawning';
+      state      = 'spawning';  // water handles its own visual fade — no puddle_fading needed
     }
   }
 
@@ -838,8 +993,7 @@ function drawIce(ic) {
     ctx.restore();
   }
 
-  // Rotate the cube body around its own center.
-  // ic.angle is 0 on a fresh or resting cube; non-zero when grabbed off-center.
+  // Rotate the cube body around its own center
   ctx.rotate(ic.angle || 0);
 
   // Body gradient
@@ -892,21 +1046,19 @@ function drawShard(s) {
   ctx.globalAlpha = s.alpha;
 
   // MELT SEQUENCE — shift shard down as it melts so the base stays at counter level
-  // rather than the shard shrinking upward away from the puddle beneath it
   const isMelting  = s.meltProgress !== undefined && s.meltProgress > 0;
   const sinkOffset = isMelting ? (1 - s.meltHeightScale) * 15 : 0;
 
   ctx.translate(s.x, s.y + sinkOffset);
 
   // MELT SEQUENCE — non-uniform scale: height shrinks faster than width
-  // giving the shard a flat, wet-slick look as it approaches fully melted
   if (isMelting) {
     ctx.scale(s.meltWidthScale, s.meltHeightScale);
   } else if (s.scale !== undefined && s.scale < 1) {
     ctx.scale(s.scale, s.scale);
   }
 
-  // Shadow — skip during melting because the per-shard droplet puddle serves that role
+  // Shadow — skip during melting because water particles serve that role
   if (!s.falling && !s.airborne && !isMelting) {
     ctx.save();
     ctx.globalAlpha = s.alpha * 0.22;
@@ -933,99 +1085,6 @@ function drawShard(s) {
   ctx.fill();
   ctx.stroke();
 
-  ctx.restore();
-}
-
-// ─── PUDDLE SYSTEM ────────────────────────────────────────────────────────────
-// Organic blob puddle with bezier-curved edges and a sheen highlight.
-// MELT SEQUENCE: puddle grows in real time as ice melts, with a shimmering edge.
-
-// Create n evenly-spaced blob anchor points with randomized radius factors (+/- 20%).
-// baseFactor is stored separately so the shimmer oscillation can be layered on top.
-function mkBlobPoints(n = 8) {
-  const pts = [];
-  for (let i = 0; i < n; i++) {
-    const f = 0.8 + Math.random() * 0.4;   // 80%–120% of base radius
-    pts.push({
-      angle:      (i / n) * Math.PI * 2,
-      factor:     f,
-      baseFactor: f   // shimmer oscillates around this — never permanently changes it
-    });
-  }
-  return pts;
-}
-
-// Trace a smooth closed blob using Catmull-Rom-style cubic bezier curves.
-// rx = horizontal radius, ry = vertical radius (ry < rx makes a flat puddle).
-function drawBlobPath(cx, cy, rx, ry, blobPoints) {
-  const n = blobPoints.length;
-  const pts = blobPoints.map(p => ({
-    x: cx + Math.cos(p.angle) * rx * p.factor,
-    y: cy + Math.sin(p.angle) * ry * p.factor
-  }));
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 0; i < n; i++) {
-    const prev = pts[(i - 1 + n) % n];
-    const curr = pts[i];
-    const next = pts[(i + 1) % n];
-    const nn   = pts[(i + 2) % n];
-    // Catmull-Rom tangents converted to cubic bezier control points
-    const cp1x = curr.x + (next.x - prev.x) * 0.25;
-    const cp1y = curr.y + (next.y - prev.y) * 0.25;
-    const cp2x = next.x - (nn.x - curr.x) * 0.25;
-    const cp2y = next.y - (nn.y - curr.y) * 0.25;
-    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
-  }
-  ctx.closePath();
-}
-
-function drawPuddle(pd) {
-  if (!pd || pd.radius <= 0.5 || pd.alpha <= 0) return;
-
-  // Flatten puddle vertically so it looks like water on a flat surface
-  const ry = pd.radius * 0.32;
-
-  ctx.save();
-
-  // Main puddle blob — light blue tint, semi-transparent
-  ctx.globalAlpha = pd.alpha;
-  ctx.fillStyle   = 'rgba(180, 210, 230, 1)';
-  drawBlobPath(pd.x, pd.y, pd.radius, ry, pd.blobPoints);
-  ctx.fill();
-
-  // Sheen — small white ellipse, slightly above and left of center, opacity 0.35
-  ctx.globalAlpha = (pd.alpha / 0.45) * 0.35;   // scale with puddle so it fades together
-  ctx.fillStyle   = 'rgba(255, 255, 255, 1)';
-  ctx.beginPath();
-  ctx.ellipse(
-    pd.x - pd.radius * 0.18,   // slightly left of center
-    pd.y - ry * 0.35,           // slightly above center
-    pd.radius * 0.25,           // semi-major: 25% of puddle radius (= 25% of half-width)
-    ry * 0.45,                  // semi-minor: proportional to flattened height
-    -0.3,                       // slight tilt
-    0, Math.PI * 2
-  );
-  ctx.fill();
-
-  ctx.restore();
-}
-
-// MELT SEQUENCE — draw a small puddle droplet centered directly under a melting shard.
-// The shard's base width grows toward this droplet's radius, making the shard look
-// like it is dissolving into the floor rather than shrinking above it.
-function drawShardDroplet(s) {
-  const radius = s.meltProgress * 18;  // grows from 0 to 18px as shard fully melts
-  if (radius < 0.5) return;
-
-  const ry = radius * 0.32;  // flatten vertically to look like liquid on a flat surface
-
-  ctx.save();
-  ctx.globalAlpha = Math.min(s.alpha, 0.65);
-  ctx.fillStyle   = 'rgba(180, 210, 230, 1)';
-  // Draw at counter surface level, centered directly under the shard
-  drawBlobPath(s.x, counterY, radius, ry, s.dropletBlobPoints);
-  ctx.fill();
   ctx.restore();
 }
 
@@ -1079,6 +1138,10 @@ function frame() {
   drawBackground();
   drawCounter();
 
+  // Water renders on the counter surface, underneath ice and shards,
+  // and persists across all game states (water is never cleared on spawn)
+  renderWater();
+
   if ((state === 'idle' || state === 'held' || state === 'falling') && ice) {
     drawIce(ice);
   }
@@ -1086,15 +1149,8 @@ function frame() {
     for (const s of shards) drawShard(s);
   }
   if (state === 'melting') {
-    // Draw main puddle deepest, then per-shard droplets, then shards on top
-    drawPuddle(puddleData);
-    for (const s of shards) {
-      drawShardDroplet(s);  // small droplet centered under each shard
-      drawShard(s);          // flattening shard on top of its droplet
-    }
-  }
-  if (state === 'puddle_fading') {
-    drawPuddle(puddleData);
+    // Water particles appear beneath the flattening shards via renderWater() above
+    for (const s of shards) drawShard(s);
   }
   if (state === 'spawning') {
     drawSpawning();
