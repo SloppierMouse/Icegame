@@ -44,7 +44,11 @@ function resize() {
   counterY = H * 0.8;
 }
 resize();
-window.addEventListener('resize', () => { resize(); if (state === 'idle' && ice) resetIcePos(); });
+window.addEventListener('resize', () => {
+  resize();
+  if (state === 'idle' && ice) resetIcePos();
+  buildPatio();  // recompute tile colours on resize so tiles fill new dimensions
+});
 
 const ICE_W = 120, ICE_H = 120;
 
@@ -911,125 +915,187 @@ function update() {
   }
 }
 
+// ─── Patio tile colours (pre-computed for subtle concrete variation) ───────────
+// Each tile gets a fixed grey offset so tiles don't flicker between frames.
+// Rebuilt on page load and on every window resize.
+const PATIO_COLS = 12;
+const PATIO_ROWS = 10;
+let tileColors   = null;
+
+function buildPatio() {
+  tileColors = new Array(PATIO_ROWS * PATIO_COLS);
+  for (let i = 0; i < tileColors.length; i++) {
+    // Base #5a5a5a = 90 in decimal. Vary ±15 for subtle concrete noise.
+    tileColors[i] = 75 + Math.floor(Math.random() * 31);  // range 75–105
+  }
+}
+buildPatio();
+
 // ─── Draw helpers ─────────────────────────────────────────────────────────────
 
-// Static marble vein paths — computed once per resize
-let veinPaths = null;
-function buildVeinPaths() {
-  veinPaths = [];
-  const numVeins = 6;
-  for (let i = 0; i < numVeins; i++) {
-    // Deterministic-ish layout so they don't jump on redraw
-    const x0 = (i / numVeins) * W * 1.1 - W * 0.05;
-    const x1 = x0 + rnd(-W * 0.3, W * 0.4);
-    const x2 = x1 + rnd(W * 0.2, W * 0.5);
-    const y0 = counterY + rnd(5, 30);
-    const y1 = counterY + rnd(10, 60);
-    const y2 = counterY + rnd(5, 50);
-    veinPaths.push({ x0, y0, x1, y1, x2, y2, w: rnd(0.4, 1.8) });
-  }
-}
-buildVeinPaths();
-window.addEventListener('resize', () => { buildVeinPaths(); });
-
+// drawBackground — moody outdoor backyard scene (sky, backyard, grass strip).
+// Does NOT draw the patio floor; that is handled by drawCounter() below.
 function drawBackground() {
-  const grad = ctx.createLinearGradient(0, 0, 0, counterY);
-  grad.addColorStop(0,   '#04060d');
-  grad.addColorStop(0.6, '#080d1a');
-  grad.addColorStop(1,   '#0c1323');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, counterY);
+  // Scene band boundaries (measured from top of canvas)
+  const horizonY  = H * 0.36;  // sky meets backyard (true horizon)
+  const grassTopY = H * 0.61;  // backyard meets grass strip
+  const patioTopY = H * 0.65;  // grass strip meets patio floor
+
+  // ── 1. Sky — golden-hour gradient ─────────────────────────────────────────
+  // Deep blue-purple at the very top blending to warm orange-pink near horizon.
+  const sky = ctx.createLinearGradient(0, 0, 0, horizonY);
+  sky.addColorStop(0,    '#1a1a3e');  // deep blue-purple
+  sky.addColorStop(0.70, '#c4603a');  // warm orange-pink
+  sky.addColorStop(0.95, '#f0a05a');  // bright warm accent near horizon
+  sky.addColorStop(1,    '#f0a05a');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, horizonY);
+
+  // Thin bright accent line right at the horizon edge
+  ctx.fillStyle = '#f7b86a';
+  ctx.fillRect(0, horizonY - 1, W, 3);
+
+  // ── 2. Backyard — dark lawn receding into distance ─────────────────────────
+  // Very dark desaturated green, nearly black.
+  const yard = ctx.createLinearGradient(0, horizonY, 0, grassTopY);
+  yard.addColorStop(0, '#111a09');  // slightly lighter near horizon
+  yard.addColorStop(1, '#090d06');  // nearly black at bottom
+  ctx.fillStyle = yard;
+  ctx.fillRect(0, horizonY, W, grassTopY - horizonY);
+
+  // Silhouetted fence — flat dark picket fence against the backyard
+  const fenceTop = horizonY + (grassTopY - horizonY) * 0.22;
+  ctx.fillStyle  = '#050a03';
+  // Top horizontal rail
+  ctx.fillRect(0, fenceTop, W, 4);
+  // Lower cross rail
+  ctx.fillRect(0, fenceTop + 15, W, 3);
+  // Vertical pickets spaced across the full width
+  const picketW   = 8;
+  const picketGap = 5;
+  const picketH   = 28;
+  for (let px = 2; px < W; px += picketW + picketGap) {
+    ctx.fillRect(px, fenceTop - 10, picketW, picketH);
+  }
+
+  // ── 3. Grass strip — narrow dark band with uneven top edge ────────────────
+  // Slightly uneven top suggests grass blades; fill down to top of patio.
+  ctx.fillStyle = '#1a2b0d';
+  ctx.beginPath();
+  ctx.moveTo(0, grassTopY);
+  // Walk left-to-right drawing small bumps that represent grass blades
+  for (let gx = 0; gx <= W + 6; gx += 6) {
+    const bump = Math.sin(gx * 0.20) * 2
+               + Math.sin(gx * 0.43) * 2
+               + Math.sin(gx * 0.085) * 4;
+    // bump ranges roughly -8 to +8; offset so blades mostly rise above grassTopY
+    ctx.lineTo(gx, grassTopY - 2 + bump);
+  }
+  ctx.lineTo(W, patioTopY);
+  ctx.lineTo(0, patioTopY);
+  ctx.closePath();
+  ctx.fill();
 }
 
+// drawCounter — concrete tile patio floor in forced perspective.
+// Replaces the old marble countertop. All collision physics are unchanged
+// (counterY stays at H * 0.8); only the visual surface is different.
 function drawCounter() {
-  // ── Counter geometry — 3D overhead-perspective trapezoid ──────────────────
-  // Back edge (at the wall): 75 % of canvas width, centered.
-  // Front edge (near lip): full canvas width, leaving room for the slab face.
-  const FACE_H   = 18;                     // visible slab thickness below front edge
-  const SHADOW_H = 10;                     // drop-shadow height below the front face
-  const backW    = W * 0.75;
-  const backL    = (W - backW) / 2;        // x of left back corner
-  const backR    = backL + backW;           // x of right back corner
-  const frontY   = H - FACE_H - SHADOW_H;  // y of the front (near) edge of the surface
-  const backY    = counterY;                // y of the back (far) edge
+  const patioTopY = H * 0.65;  // top of patio (matches drawBackground bottom)
+  const vpX       = W / 2;     // vanishing point x — centred horizontally
+  const vpY       = patioTopY; // vanishing point y — top edge of patio
 
-  // ── Counter surface with overhead-perspective gradient ────────────────────
-  // Lighter toward the back edge (farther from viewer) to sell the 3D angle.
-  const surf = ctx.createLinearGradient(0, backY, 0, frontY);
-  surf.addColorStop(0,   '#dcdad6');
-  surf.addColorStop(0.2, '#e4e2de');
-  surf.addColorStop(0.6, '#d0cecc');
-  surf.addColorStop(1,   '#c4c2be');
+  // Solid base fill: dark cool grey covers the whole patio region
+  ctx.fillStyle = '#575a5c';
+  ctx.fillRect(0, patioTopY, W, H - patioTopY);
 
-  ctx.beginPath();
-  ctx.moveTo(backL, backY);
-  ctx.lineTo(backR, backY);
-  ctx.lineTo(W,     frontY);
-  ctx.lineTo(0,     frontY);
-  ctx.closePath();
-  ctx.fillStyle = surf;
-  ctx.fill();
-
-  // ── Marble veining — clipped to the trapezoid surface ─────────────────────
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(backL, backY);
-  ctx.lineTo(backR, backY);
-  ctx.lineTo(W,     frontY);
-  ctx.lineTo(0,     frontY);
-  ctx.closePath();
-  ctx.clip();
-  ctx.globalAlpha = 0.15;
-  for (const v of veinPaths) {
-    ctx.beginPath();
-    ctx.moveTo(v.x0, v.y0);
-    ctx.quadraticCurveTo(v.x1, v.y1, v.x2, v.y2);
-    ctx.strokeStyle = '#777';
-    ctx.lineWidth   = v.w;
-    ctx.stroke();
+  // Column line endpoints at y = H (bottom of screen).
+  // Extend 15 % beyond each edge so tiles reach the canvas corners.
+  const colXBot = [];
+  for (let c = 0; c <= PATIO_COLS; c++) {
+    colXBot[c] = W * (-0.15 + c * 1.30 / PATIO_COLS);
   }
-  ctx.restore();
 
-  // ── Back-edge highlight (rim of counter where it meets the wall) ──────────
-  // Follows the back edge width of the trapezoid rather than the full canvas.
-  const edgeGrad = ctx.createLinearGradient(0, backY, 0, backY + 8);
-  edgeGrad.addColorStop(0,   'rgba(255,255,255,0.65)');
-  edgeGrad.addColorStop(0.5, 'rgba(230,230,230,0.2)');
-  edgeGrad.addColorStop(1,   'rgba(200,200,200,0)');
-  // Interpolate trapezoid edges 8 px below the back edge
-  const edgeRatio = 8 / (frontY - backY);
-  const edgeBotL  = backL * (1 - edgeRatio);   // left edge of trap at backY+8
-  const edgeBotR  = backR + backL * edgeRatio;  // right edge of trap at backY+8
+  // Row y-positions with perspective compression:
+  // exponent > 1 pushes row lines together near the horizon, farther apart near viewer.
+  const rowY = [];
+  for (let r = 0; r <= PATIO_ROWS; r++) {
+    const t  = r / PATIO_ROWS;
+    rowY[r]  = patioTopY + (H - patioTopY) * Math.pow(t, 2.2);
+  }
+
+  // Return the x-coordinate on column line `col` at the given screen y.
+  function cxAt(col, y) {
+    const t = (y - vpY) / (H - vpY);
+    return vpX + (colXBot[col] - vpX) * t;
+  }
+
+  // Clip tile drawing to the patio region so edge columns don't bleed out
   ctx.save();
   ctx.beginPath();
-  ctx.moveTo(backL,    backY);
-  ctx.lineTo(backR,    backY);
-  ctx.lineTo(edgeBotR, backY + 8);
-  ctx.lineTo(edgeBotL, backY + 8);
-  ctx.closePath();
-  ctx.fillStyle = edgeGrad;
-  ctx.fill();
+  ctx.rect(0, patioTopY, W, H - patioTopY);
+  ctx.clip();
+
+  // Fill each tile quad with its pre-computed grey value.
+  // The +4 on the blue channel gives a very slight cool cast to read as concrete.
+  for (let r = 0; r < PATIO_ROWS; r++) {
+    const y0 = rowY[r];
+    const y1 = rowY[r + 1];
+    for (let c = 0; c < PATIO_COLS; c++) {
+      const v = tileColors ? tileColors[r * PATIO_COLS + c] : 90;
+      ctx.fillStyle = `rgb(${v}, ${v}, ${v + 4})`;
+      ctx.beginPath();
+      ctx.moveTo(cxAt(c,     y0), y0);
+      ctx.lineTo(cxAt(c + 1, y0), y0);
+      ctx.lineTo(cxAt(c + 1, y1), y1);
+      ctx.lineTo(cxAt(c,     y1), y1);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Grout lines: column lines radiate from vanishing point; row lines are horizontal.
+  // Slightly darker than tile base colour.
+  ctx.strokeStyle = '#3d4042';
+  ctx.lineWidth   = 1;
+  ctx.beginPath();
+
+  // Radiating column lines converging at the vanishing point
+  for (let c = 0; c <= PATIO_COLS; c++) {
+    ctx.moveTo(vpX,          vpY);
+    ctx.lineTo(colXBot[c],   H);
+  }
+
+  // Horizontal row lines at perspective-spaced y values (skip the very first — it's the horizon edge)
+  for (let r = 1; r < PATIO_ROWS; r++) {
+    ctx.moveTo(0,    rowY[r]);
+    ctx.lineTo(W,    rowY[r]);
+  }
+
+  ctx.stroke();
+
+  // Subtle shadow gradient at the very top of the patio to separate it from the grass
+  const topFade = ctx.createLinearGradient(0, patioTopY, 0, patioTopY + 18);
+  topFade.addColorStop(0, 'rgba(0,0,0,0.35)');
+  topFade.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = topFade;
+  ctx.fillRect(0, patioTopY, W, 18);
+
   ctx.restore();
+}
 
-  // ── Front face (visible slab thickness) ───────────────────────────────────
-  // Noticeably darker than the surface to read as a vertical face.
-  ctx.fillStyle = '#9a9894';
-  ctx.fillRect(0, frontY, W, FACE_H);
-  // Subtle inner gradient adds depth to the face
-  const faceShade = ctx.createLinearGradient(0, frontY, 0, frontY + FACE_H);
-  faceShade.addColorStop(0,   'rgba(0,0,0,0.08)');
-  faceShade.addColorStop(0.5, 'rgba(0,0,0,0.02)');
-  faceShade.addColorStop(1,   'rgba(0,0,0,0.16)');
-  ctx.fillStyle = faceShade;
-  ctx.fillRect(0, frontY, W, FACE_H);
-
-  // ── Drop shadow below the front face ──────────────────────────────────────
-  const dropShadow = ctx.createLinearGradient(0, frontY + FACE_H, 0, H);
-  dropShadow.addColorStop(0,   'rgba(0,0,0,0.40)');
-  dropShadow.addColorStop(0.5, 'rgba(0,0,0,0.12)');
-  dropShadow.addColorStop(1,   'rgba(0,0,0,0)');
-  ctx.fillStyle = dropShadow;
-  ctx.fillRect(0, frontY + FACE_H, W, SHADOW_H);
+// drawVignette — dark radial gradient overlay around canvas edges.
+// Called last each frame so it frames the entire scene including game elements.
+function drawVignette() {
+  const vign = ctx.createRadialGradient(
+    W * 0.5, H * 0.5, Math.min(W, H) * 0.25,
+    W * 0.5, H * 0.5, Math.max(W, H) * 0.82
+  );
+  vign.addColorStop(0,    'rgba(0,0,0,0)');
+  vign.addColorStop(0.55, 'rgba(0,0,0,0)');
+  vign.addColorStop(1,    'rgba(0,0,0,0.65)');
+  ctx.fillStyle = vign;
+  ctx.fillRect(0, 0, W, H);
 }
 
 function drawIce(ic) {
@@ -1197,7 +1263,7 @@ function frame() {
   drawBackground();
   drawCounter();
 
-  // Water renders on the counter surface, underneath ice and shards,
+  // Water renders on the patio surface, underneath ice and shards,
   // and persists across all game states (water is never cleared on spawn)
   renderWater();
 
@@ -1214,6 +1280,9 @@ function frame() {
   if (state === 'spawning') {
     drawSpawning();
   }
+
+  // Vignette goes last so it frames the entire scene including game elements
+  drawVignette();
 
   requestAnimationFrame(frame);
 }
