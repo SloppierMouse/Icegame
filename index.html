@@ -47,7 +47,7 @@ resize();
 window.addEventListener('resize', () => {
   resize();
   if (state === 'idle' && ice) resetIcePos();
-  buildPatio();  // recompute tile colours on resize so tiles fill new dimensions
+  buildPatio();  // called on resize (no-op in zen garden version)
 });
 
 const ICE_W = 120, ICE_H = 120;
@@ -915,187 +915,233 @@ function update() {
   }
 }
 
-// ─── Patio tile colours (pre-computed for subtle concrete variation) ───────────
-// Each tile gets a fixed grey offset so tiles don't flicker between frames.
-// Rebuilt on page load and on every window resize.
-const PATIO_COLS = 12;
-const PATIO_ROWS = 10;
-let tileColors   = null;
-
-function buildPatio() {
-  tileColors = new Array(PATIO_ROWS * PATIO_COLS);
-  for (let i = 0; i < tileColors.length; i++) {
-    // Base #5a5a5a = 90 in decimal. Vary ±15 for subtle concrete noise.
-    tileColors[i] = 75 + Math.floor(Math.random() * 31);  // range 75–105
-  }
-}
+// ─── buildPatio (kept for resize-listener compatibility) ──────────────────────
+// The old concrete patio tile floor has been replaced with a tatami mat.
+// No pre-computed tile colours are needed for the new scene, so this is a no-op.
+function buildPatio() { /* no longer used — tatami is drawn directly in drawCounter */ }
 buildPatio();
 
 // ─── Draw helpers ─────────────────────────────────────────────────────────────
 
-// drawBackground — moody outdoor backyard scene (sky, backyard, grass strip).
-// Does NOT draw the patio floor; that is handled by drawCounter() below.
+// drawBackground — Japanese zen garden viewed through a window.
+// Draws the sky and garden elements behind the window sill and tatami floor.
+// The window sill and tatami mat are drawn separately in drawCounter() below.
 function drawBackground() {
-  // Scene band boundaries (measured from top of canvas)
-  const horizonY  = H * 0.36;  // sky meets backyard (true horizon)
-  const grassTopY = H * 0.61;  // backyard meets grass strip
-  const patioTopY = H * 0.65;  // grass strip meets patio floor
 
-  // ── 1. Sky — golden-hour gradient ─────────────────────────────────────────
-  // Deep blue-purple at the very top blending to warm orange-pink near horizon.
-  const sky = ctx.createLinearGradient(0, 0, 0, horizonY);
-  sky.addColorStop(0,    '#1a1a3e');  // deep blue-purple
-  sky.addColorStop(0.70, '#c4603a');  // warm orange-pink
-  sky.addColorStop(0.95, '#f0a05a');  // bright warm accent near horizon
-  sky.addColorStop(1,    '#f0a05a');
+  // Bottom of the garden window opening — where the wood sill begins
+  const gardenBottomY = H * 0.67;
+
+  // ── 1. Sky — soft overcast grey-green fills the entire garden window area ──────
+  // A diffused grey-green light suggests a quiet, cloudy Japanese morning.
+  // No harsh blue sky or bright sun — everything is soft and muted.
+  const sky = ctx.createLinearGradient(0, 0, 0, gardenBottomY);
+  sky.addColorStop(0,    '#8a9e7a');   // pale grey-green at the top
+  sky.addColorStop(0.65, '#79906c');   // slightly deeper mid-sky
+  sky.addColorStop(1,    '#6e8560');   // darkest just above the garden floor
   ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, W, horizonY);
+  ctx.fillRect(0, 0, W, gardenBottomY);
 
-  // Thin bright accent line right at the horizon edge
-  ctx.fillStyle = '#f7b86a';
-  ctx.fillRect(0, horizonY - 1, W, 3);
+  // ── 2. Gravel / pale stone ground at the base of the garden ──────────────────
+  // A band of pale raked gravel sits just above the window sill — typical of
+  // a Japanese dry garden (karesansui). Colour #b0b0a0 = pale stone grey.
+  const gravelH = H * 0.055;
+  const gravelY = gardenBottomY - gravelH;
 
-  // ── 2. Backyard — dark lawn receding into distance ─────────────────────────
-  // Very dark desaturated green, nearly black.
-  const yard = ctx.createLinearGradient(0, horizonY, 0, grassTopY);
-  yard.addColorStop(0, '#111a09');  // slightly lighter near horizon
-  yard.addColorStop(1, '#090d06');  // nearly black at bottom
-  ctx.fillStyle = yard;
-  ctx.fillRect(0, horizonY, W, grassTopY - horizonY);
+  ctx.fillStyle = '#b0b0a0';
+  ctx.fillRect(0, gravelY, W, gravelH);
 
-  // Silhouetted fence — flat dark picket fence against the backyard
-  const fenceTop = horizonY + (grassTopY - horizonY) * 0.22;
-  ctx.fillStyle  = '#050a03';
-  // Top horizontal rail
-  ctx.fillRect(0, fenceTop, W, 4);
-  // Lower cross rail
-  ctx.fillRect(0, fenceTop + 15, W, 3);
-  // Vertical pickets spaced across the full width
-  const picketW   = 8;
-  const picketGap = 5;
-  const picketH   = 28;
-  for (let px = 2; px < W; px += picketW + picketGap) {
-    ctx.fillRect(px, fenceTop - 10, picketW, picketH);
+  // Soft fade at the top edge of the gravel so it blends into the garden rather
+  // than having a sharp hard line where the stone meets the grass/shadow area.
+  const gravelFade = ctx.createLinearGradient(0, gravelY - 12, 0, gravelY + 22);
+  gravelFade.addColorStop(0,   'rgba(176,176,160,0)');
+  gravelFade.addColorStop(0.45,'rgba(176,176,160,0.55)');
+  gravelFade.addColorStop(1,   'rgba(176,176,160,1)');
+  ctx.fillStyle = gravelFade;
+  ctx.fillRect(0, gravelY - 12, W, 34);
+
+  // ── Helper: draw one organic shrub as three overlapping ellipses ──────────────
+  // Using multiple overlapping circles gives a rounded, irregular plant shape
+  // rather than a plain geometric oval. The caller sets ctx.fillStyle before calling.
+  // cx/baseY = centre x, ground y. w/h = total bounding width/height of the shrub.
+  function drawShrub(cx, baseY, w, h) {
+    // Tall central body — the highest part of the shrub
+    ctx.beginPath();
+    ctx.ellipse(cx, baseY - h * 0.56, w * 0.50, h * 0.56, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Left lobe — slightly lower and smaller for an uneven organic outline
+    ctx.beginPath();
+    ctx.ellipse(cx - w * 0.36, baseY - h * 0.38, w * 0.36, h * 0.40, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Right lobe — slightly different height from the left for natural asymmetry
+    ctx.beginPath();
+    ctx.ellipse(cx + w * 0.33, baseY - h * 0.43, w * 0.38, h * 0.42, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Thin base fill — closes any gaps between the ellipses at ground level
+    ctx.fillRect(cx - w * 0.52, baseY - h * 0.13, w * 1.04, h * 0.15);
   }
 
-  // ── 3. Grass strip — narrow dark band with uneven top edge ────────────────
-  // Slightly uneven top suggests grass blades; fill down to top of patio.
-  ctx.fillStyle = '#1a2b0d';
+  // Shrubs root at the gravel surface
+  const shrubBaseY = gravelY + 5;
+
+  // ── 3. Back shrubs — lighter, more grey-green: appear to be farther away ────────
+  // Desaturated colour makes distant plants look hazy — a simple depth cue.
+  ctx.fillStyle = '#4a7242';
+  drawShrub(W * 0.10, shrubBaseY, W * 0.14, H * 0.13);   // left background shrub
+  drawShrub(W * 0.82, shrubBaseY, W * 0.13, H * 0.11);   // right background shrub
+
+  // ── 4. Front shrubs — darker, richer green: appear closer to the viewer ─────────
+  ctx.fillStyle = '#2d5a27';
+  drawShrub(W * 0.20, shrubBaseY, W * 0.17, H * 0.17);   // left foreground shrub
+
+  ctx.fillStyle = '#3a6b2f';
+  drawShrub(W * 0.70, shrubBaseY, W * 0.16, H * 0.15);   // right foreground shrub
+
+  // ── 5. Stone lantern — simple silhouette in the midground ────────────────────
+  // A traditional ishidoro lantern is suggested by a narrow column with a rounded cap.
+  // No surface detail — just a dark shape against the lighter shrubs.
+  const lanternX    = W * 0.55;          // slightly right of centre
+  const lanternBotY = gravelY + 3;       // base rests on the gravel
+  const colH        = H * 0.065;         // column / stem height
+  const colW        = 9;                 // column width in pixels
+  const capW        = 22;                // lantern cap (hood) width
+  const capH        = 11;                // lantern cap height
+
+  ctx.fillStyle = '#253020';  // very dark grey-green blends into the shadowed garden
+
+  // Narrow vertical stem
+  ctx.fillRect(lanternX - colW / 2, lanternBotY - colH, colW, colH);
+
+  // Rounded cap — the wide hood that sits on top of the column
   ctx.beginPath();
-  ctx.moveTo(0, grassTopY);
-  // Walk left-to-right drawing small bumps that represent grass blades
-  for (let gx = 0; gx <= W + 6; gx += 6) {
-    const bump = Math.sin(gx * 0.20) * 2
-               + Math.sin(gx * 0.43) * 2
-               + Math.sin(gx * 0.085) * 4;
-    // bump ranges roughly -8 to +8; offset so blades mostly rise above grassTopY
-    ctx.lineTo(gx, grassTopY - 2 + bump);
-  }
-  ctx.lineTo(W, patioTopY);
-  ctx.lineTo(0, patioTopY);
-  ctx.closePath();
+  ctx.ellipse(lanternX, lanternBotY - colH - capH * 0.5,
+              capW / 2, capH / 2, 0, 0, Math.PI * 2);
   ctx.fill();
+
+  // Small rectangular base plinth — wider than the column, sits on the gravel
+  ctx.fillRect(lanternX - capW * 0.65, lanternBotY - 5, capW * 1.3, 7);
 }
 
-// drawCounter — concrete tile patio floor in forced perspective.
-// Replaces the old marble countertop. All collision physics are unchanged
-// (counterY stays at H * 0.8); only the visual surface is different.
+// drawCounter — tatami mat floor and wood window sill.
+// Replaces the old concrete patio tile floor. All physics are unchanged —
+// the collision boundary (counterY = H * 0.80) is not touched; only visuals change.
 function drawCounter() {
-  const patioTopY = H * 0.65;  // top of patio (matches drawBackground bottom)
-  const vpX       = W / 2;     // vanishing point x — centred horizontally
-  const vpY       = patioTopY; // vanishing point y — top edge of patio
 
-  // Solid base fill: dark cool grey covers the whole patio region
-  ctx.fillStyle = '#575a5c';
-  ctx.fillRect(0, patioTopY, W, H - patioTopY);
+  // Band boundaries — sill sits between garden view and tatami
+  const sillTopY = H * 0.67;   // top of the wood sill = bottom of garden view
+  const sillBotY = H * 0.70;   // bottom of the sill = top of tatami mat
 
-  // Column line endpoints at y = H (bottom of screen).
-  // Extend 15 % beyond each edge so tiles reach the canvas corners.
-  const colXBot = [];
-  for (let c = 0; c <= PATIO_COLS; c++) {
-    colXBot[c] = W * (-0.15 + c * 1.30 / PATIO_COLS);
+  // ── 1. Tatami mat — warm honey-beige floor from sill to bottom of canvas ────────
+  // This is the surface the ice cube sits on. The collision boundary counterY = H * 0.80
+  // sits well within this band, so the cube appears to rest naturally on the tatami.
+  ctx.fillStyle = '#d4c89a';
+  ctx.fillRect(0, sillBotY, W, H - sillBotY);
+
+  // Lighting gradient — soft window light falls from above, so the tatami is slightly
+  // brighter near the sill and gradually dims toward the bottom of the canvas.
+  const tatLighting = ctx.createLinearGradient(0, sillBotY, 0, H);
+  tatLighting.addColorStop(0,    'rgba(255,248,215,0.24)');  // warm bright near window
+  tatLighting.addColorStop(0.35, 'rgba(255,248,215,0)');     // fades to neutral mid-mat
+  tatLighting.addColorStop(1,    'rgba(0,0,0,0.18)');        // slightly dark at the far bottom
+  ctx.fillStyle = tatLighting;
+  ctx.fillRect(0, sillBotY, W, H - sillBotY);
+
+  // Horizontal grain lines — run across the full canvas width every 12 px.
+  // Slightly darker than the tatami base to suggest the woven igusa reed texture.
+  ctx.strokeStyle = 'rgba(155,138,95,0.38)';
+  ctx.lineWidth   = 0.8;
+  for (let gy = sillBotY + 6; gy < H; gy += 12) {
+    ctx.beginPath();
+    ctx.moveTo(0, gy);
+    ctx.lineTo(W, gy);
+    ctx.stroke();
   }
 
-  // Row y-positions with perspective compression:
-  // exponent > 1 pushes row lines together near the horizon, farther apart near viewer.
-  const rowY = [];
-  for (let r = 0; r <= PATIO_ROWS; r++) {
-    const t  = r / PATIO_ROWS;
-    rowY[r]  = patioTopY + (H - patioTopY) * Math.pow(t, 2.2);
+  // Faint vertical seam lines every ~200 px — suggest the edges of individual
+  // tatami blocks (each mat is a rectangle; multiple mats tile the floor).
+  ctx.strokeStyle = 'rgba(155,138,95,0.20)';
+  ctx.lineWidth   = 0.7;
+  for (let gx = 200; gx < W; gx += 200) {
+    ctx.beginPath();
+    ctx.moveTo(gx, sillBotY);
+    ctx.lineTo(gx, H);
+    ctx.stroke();
   }
 
-  // Return the x-coordinate on column line `col` at the given screen y.
-  function cxAt(col, y) {
-    const t = (y - vpY) / (H - vpY);
-    return vpX + (colXBot[col] - vpX) * t;
-  }
+  // Soft shadow at the very bottom edge — grounds the scene at the canvas boundary
+  const botShadow = ctx.createLinearGradient(0, H - 35, 0, H);
+  botShadow.addColorStop(0, 'rgba(0,0,0,0)');
+  botShadow.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = botShadow;
+  ctx.fillRect(0, H - 35, W, 35);
 
-  // Clip tile drawing to the patio region so edge columns don't bleed out
+  // ── 2. Window sill — dark wood horizontal band ────────────────────────────────
+  // A thick engawa-style sill separates the garden view above from the tatami below.
+  ctx.fillStyle = '#3a2010';
+  ctx.fillRect(0, sillTopY, W, sillBotY - sillTopY);
+
+  // Thin highlight along the top edge of the sill — gives the wood a polished,
+  // three-dimensional appearance as if catching diffused light from the garden.
+  const sillHL = ctx.createLinearGradient(0, sillTopY, 0, sillTopY + 5);
+  sillHL.addColorStop(0, 'rgba(130,75,35,0.75)');
+  sillHL.addColorStop(1, 'rgba(130,75,35,0)');
+  ctx.fillStyle = sillHL;
+  ctx.fillRect(0, sillTopY, W, 5);
+}
+
+// drawVignette — dark wood window frame overlay drawn on top of everything.
+// Called last each frame so the frame sits over all game elements near the edges.
+// The left, right, and top borders frame the scene like a picture window.
+function drawVignette() {
+  const frameW     = 40;          // frame border thickness in pixels
+  const blindH     = 80;          // height of the bamboo blind hanging below the top frame
+  const frameColor = '#2a1508';   // rich dark wood brown
+
+  // ── Left, right, and top wood frame borders ────────────────────────────────────
+  ctx.fillStyle = frameColor;
+  ctx.fillRect(0,          0, frameW, H);     // left border — full height
+  ctx.fillRect(W - frameW, 0, frameW, H);     // right border — full height
+  ctx.fillRect(0,          0, W, frameW);     // top border — full width
+
+  // ── Bamboo blind suggestion below the top frame ────────────────────────────────
+  // A partially-rolled bamboo shade (sudare) is suggested by thin horizontal slat
+  // lines hanging from the bottom edge of the top frame border.
   ctx.save();
+  // Clip drawing to the inner window area so slat lines don't overdraw the side frames
   ctx.beginPath();
-  ctx.rect(0, patioTopY, W, H - patioTopY);
+  ctx.rect(frameW, frameW, W - frameW * 2, blindH);
   ctx.clip();
 
-  // Fill each tile quad with its pre-computed grey value.
-  // The +4 on the blue channel gives a very slight cool cast to read as concrete.
-  for (let r = 0; r < PATIO_ROWS; r++) {
-    const y0 = rowY[r];
-    const y1 = rowY[r + 1];
-    for (let c = 0; c < PATIO_COLS; c++) {
-      const v = tileColors ? tileColors[r * PATIO_COLS + c] : 90;
-      ctx.fillStyle = `rgb(${v}, ${v}, ${v + 4})`;
-      ctx.beginPath();
-      ctx.moveTo(cxAt(c,     y0), y0);
-      ctx.lineTo(cxAt(c + 1, y0), y0);
-      ctx.lineTo(cxAt(c + 1, y1), y1);
-      ctx.lineTo(cxAt(c,     y1), y1);
-      ctx.closePath();
-      ctx.fill();
-    }
+  // Semi-transparent dark layer gives the blind a slightly shadowed, opaque feel
+  ctx.fillStyle = 'rgba(42,21,8,0.50)';
+  ctx.fillRect(frameW, frameW, W - frameW * 2, blindH);
+
+  // Individual bamboo slat lines — slightly lighter than the frame, spaced ~7 px apart
+  ctx.strokeStyle = '#3d2010';
+  ctx.lineWidth   = 1.2;
+  for (let sy = frameW + 5; sy < frameW + blindH; sy += 7) {
+    ctx.beginPath();
+    ctx.moveTo(frameW,     sy);
+    ctx.lineTo(W - frameW, sy);
+    ctx.stroke();
   }
-
-  // Grout lines: column lines radiate from vanishing point; row lines are horizontal.
-  // Slightly darker than tile base colour.
-  ctx.strokeStyle = '#3d4042';
-  ctx.lineWidth   = 1;
-  ctx.beginPath();
-
-  // Radiating column lines converging at the vanishing point
-  for (let c = 0; c <= PATIO_COLS; c++) {
-    ctx.moveTo(vpX,          vpY);
-    ctx.lineTo(colXBot[c],   H);
-  }
-
-  // Horizontal row lines at perspective-spaced y values (skip the very first — it's the horizon edge)
-  for (let r = 1; r < PATIO_ROWS; r++) {
-    ctx.moveTo(0,    rowY[r]);
-    ctx.lineTo(W,    rowY[r]);
-  }
-
-  ctx.stroke();
-
-  // Subtle shadow gradient at the very top of the patio to separate it from the grass
-  const topFade = ctx.createLinearGradient(0, patioTopY, 0, patioTopY + 18);
-  topFade.addColorStop(0, 'rgba(0,0,0,0.35)');
-  topFade.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = topFade;
-  ctx.fillRect(0, patioTopY, W, 18);
 
   ctx.restore();
-}
 
-// drawVignette — dark radial gradient overlay around canvas edges.
-// Called last each frame so it frames the entire scene including game elements.
-function drawVignette() {
-  const vign = ctx.createRadialGradient(
-    W * 0.5, H * 0.5, Math.min(W, H) * 0.25,
-    W * 0.5, H * 0.5, Math.max(W, H) * 0.82
-  );
-  vign.addColorStop(0,    'rgba(0,0,0,0)');
-  vign.addColorStop(0.55, 'rgba(0,0,0,0)');
-  vign.addColorStop(1,    'rgba(0,0,0,0.65)');
-  ctx.fillStyle = vign;
-  ctx.fillRect(0, 0, W, H);
+  // Soft inner-edge shadows on the left and right frame borders — adds depth so the
+  // frame looks like a thick beam rather than a flat painted stripe.
+  const shadowW = 18;
+
+  const leftShadow = ctx.createLinearGradient(frameW, 0, frameW + shadowW, 0);
+  leftShadow.addColorStop(0, 'rgba(0,0,0,0.32)');
+  leftShadow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = leftShadow;
+  ctx.fillRect(frameW, 0, shadowW, H);
+
+  const rightShadow = ctx.createLinearGradient(W - frameW, 0, W - frameW - shadowW, 0);
+  rightShadow.addColorStop(0, 'rgba(0,0,0,0.32)');
+  rightShadow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = rightShadow;
+  ctx.fillRect(W - frameW - shadowW, 0, shadowW, H);
 }
 
 function drawIce(ic) {
