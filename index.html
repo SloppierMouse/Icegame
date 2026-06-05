@@ -184,6 +184,78 @@ canvas.addEventListener('mouseup', () => {
   canvas.style.cursor = 'default';
 });
 
+// ─── Touch support — mirrors mouse grab/drag/release/smash for mobile ─────────
+// Three touch listeners run the same internal logic as their mouse counterparts.
+// { passive: false } is required so preventDefault() can block scroll and pinch-zoom.
+// The canvas fills the full viewport (no CSS offset), so clientX/Y == canvas X/Y.
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();  // block page scroll and zoom while touching the canvas
+  const t    = e.touches[0];
+  mouse.x    = t.clientX;
+  mouse.y    = t.clientY;
+  mouse.down = true;
+
+  // Same grab logic as mousedown — lift the ice cube or start dragging a shard
+  if (state === 'idle' && ice && hitBox(mouse.x, mouse.y, ice.x, ice.y, ICE_W, ICE_H)) {
+    const rodX          = ice.x - mouse.x;
+    const rodY          = ice.y - mouse.y;
+    pendulumLen         = Math.sqrt(rodX * rodX + rodY * rodY);
+    pendulumAngle       = Math.atan2(rodX, rodY);
+    pendulumAngleAtGrab = pendulumAngle;
+    pendulumAngVel      = 0;
+    cubeAngleAtGrab     = ice.angle;
+    lastMouseX          = mouse.x;
+    drag = { type: 'ice' };
+    state = 'held';
+    mouseHistory = [];
+  } else if (state === 'cracked') {
+    for (let i = 0; i < shards.length; i++) {
+      const s = shards[i];
+      if (!s.falling && hitPoly(mouse.x - s.x, mouse.y - s.y, s.poly)) {
+        drag = { type: 'shard', idx: i, offX: mouse.x - s.x, offY: mouse.y - s.y };
+        break;
+      }
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();  // block scroll while dragging; update() reads mouse.x/y each frame
+  const t = e.touches[0];
+  mouse.x = t.clientX;
+  mouse.y = t.clientY;
+  // Velocity tracking (mouseHistory) and smash detection happen inside update() —
+  // they read mouse.x/y automatically, so no extra work is needed here.
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();  // block tap-related browser gestures on release
+  // touches[] is empty on release — changedTouches[0] holds the lifted finger position
+  const t    = e.changedTouches[0];
+  mouse.x    = t.clientX;
+  mouse.y    = t.clientY;
+  mouse.down = false;
+
+  // Same release logic as mouseup — throw the cube or drop the shard
+  if (state === 'held' && drag && drag.type === 'ice') {
+    releaseDrop();
+  }
+  if (state === 'cracked' && drag && drag.type === 'shard') {
+    const s = shards[drag.idx];
+    if (s) {
+      const floor = counterY - 10;
+      if (s.y < floor - 5) {
+        s.airborne = true;
+        s.airVy    = s.vy;
+      } else {
+        s.y = floor;
+      }
+    }
+  }
+  drag = null;
+}, { passive: false });
+
 // ─── Hit testing ──────────────────────────────────────────────────────────────
 function hitBox(mx, my, cx, cy, w, h) {
   return mx >= cx - w/2 && mx <= cx + w/2 && my >= cy - h/2 && my <= cy + h/2;
