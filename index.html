@@ -331,6 +331,9 @@ let waterRipples    = [];
 let waterDroplets   = [];
 // true once the current melt batch finishes — new settled droplets start evaporating immediately
 let waterEvapActive = false;
+// X centre of the shard cluster when melting begins — all particles spawn within 40 px of this
+// so they form one tight puddle regardless of how far shards slid before stopping
+let meltCenterX = 0;
 
 // Two offscreen canvases allocated once, resized on window resize
 let waterBlobCanvas = null, waterBlobCtx = null;
@@ -531,7 +534,7 @@ function renderWater() {
     // Step 3 — colorize: source-in fills only where the thresholded blobs have alpha.
     // Result: translucent blue water blobs, thicker (more opaque) where particles overlap.
     waterMaskCtx.globalCompositeOperation = 'source-in';
-    waterMaskCtx.fillStyle = 'rgba(100, 168, 220, 0.68)';
+    waterMaskCtx.fillStyle = 'rgba(100, 168, 220, 0.94)';
     waterMaskCtx.fillRect(0, 0, W, H);
     waterMaskCtx.globalCompositeOperation = 'source-over';
 
@@ -909,6 +912,10 @@ function update() {
       // Reset evap gate so particles spawned during this melt don't evaporate yet
       waterEvapActive = false;
 
+      // Record the centroid of all landed shards so every water particle spawns
+      // within 40 px of it — keeps the puddle tight on wide desktop screens
+      meltCenterX = shards.reduce((sum, s) => sum + s.x, 0) / shards.length;
+
       // Initialise each shard for the melt animation
       for (const s of shards) {
         s.meltProgress    = 0;      // 0.0 = frozen, 1.0 = fully melted
@@ -954,8 +961,10 @@ function update() {
       if (!s.waterSpawned && s.meltProgress >= 0.5) {
         const count = rndInt(2, 4);
         for (let k = 0; k < count; k++) {
+          // Spawn within 40 px of the shard centroid so all particles cluster
+          // together and trigger the metaball merge threshold on desktop
           spawnWaterParticle(
-            s.x + rnd(-18, 18),
+            meltCenterX + rnd(-40, 40),
             counterY + rnd(-4, 4),
             rnd(14, 22)
           );
