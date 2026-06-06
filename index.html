@@ -62,7 +62,9 @@ function lerp(a, b, t){ return a + (b - a) * t; }
 function sayNiceCrack() {
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(new SpeechSynthesisUtterance('nice crack bro'));
+  const utterance = new SpeechSynthesisUtterance('nice crack bro');
+  utterance.volume = 1;
+  window.speechSynthesis.speak(utterance);
 }
 
 // ─── Game state ───────────────────────────────────────────────────────────────
