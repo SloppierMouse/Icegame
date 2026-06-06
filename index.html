@@ -93,6 +93,14 @@ const MELT_RATE   = 0.004;  // meltProgress increase per frame
 let spawnTimer = 0;
 const SPAWN_FRAMES = 60;     // 1 second at 60 fps
 
+// ─── Orphan shards — shards that persist after a tap-spawn ────────────────────
+// When the player taps to instantly spawn a new cube, any existing shards move
+// here so they continue their settle → melt → water sequence independently.
+// The main game state advances to 'idle' without waiting for them.
+let orphanShards      = [];    // shard objects (same structure as shards[])
+let orphanMeltCenterX = 0;    // centroid X used when spawning water particles
+let orphanMelting     = false; // false = sliding phase, true = melt phase
+
 // ─── Crack accumulation thresholds ────────────────────────────────────────────
 // The cube breaks apart only when EITHER enough crack lines have built up OR
 // their total combined length is long enough.  Tuned so that 3–5 gentle drops
@@ -160,6 +168,13 @@ canvas.addEventListener('mousedown', e => {
       }
     }
   }
+
+  // Tap-to-spawn: if the player tapped empty space (nothing grabbed) while no
+  // cube is being held, immediately drop a fresh cube — no timer wait needed.
+  // Existing shards/water continue on their own schedule uninterrupted.
+  if (drag === null && (state === 'cracked' || state === 'melting' || state === 'spawning')) {
+    spawnCubeNow();
+  }
 });
 
 canvas.addEventListener('mouseup', () => {
@@ -217,6 +232,11 @@ canvas.addEventListener('touchstart', e => {
         break;
       }
     }
+  }
+
+  // Tap-to-spawn: mirrors the mousedown logic — empty tap spawns a new cube instantly
+  if (drag === null && (state === 'cracked' || state === 'melting' || state === 'spawning')) {
+    spawnCubeNow();
   }
 }, { passive: false });
 
@@ -572,6 +592,129 @@ function renderWater() {
 }
 // ─── END WATER SYSTEM ─────────────────────────────────────────────────────────
 
+// ─── Orphan shard update — runs every frame regardless of game state ──────────
+// Replicates the 'cracked' sliding physics and 'melting' animation for shards
+// that were left behind when the player tapped to spawn a new cube early.
+function updateOrphanShards() {
+  if (orphanShards.length === 0) return;
+
+  if (!orphanMelting) {
+    // ── Sliding / settling phase ─────────────────────────────────────────────
+    for (let i = orphanShards.length - 1; i >= 0; i--) {
+      const s = orphanShards[i];
+
+      if (s.falling) {
+        // Shard slid off the edge — fall and fade out
+        s.fallVy += 1.8;
+        s.x      += s.vx * 0.9;
+        s.y      += s.fallVy;
+        s.vx     *= 0.9;
+        s.alpha  -= 0.035;
+        if (s.alpha <= 0) { orphanShards.splice(i, 1); }
+        continue;
+      }
+
+      if (s.airborne) {
+        // High-drop arc
+        s.airVy += 0.55;
+        s.x     += s.vx;
+        s.y     += s.airVy;
+        s.vx    *= 0.98;
+        const floor = counterY - 10;
+        if (s.y >= floor) {
+          s.y        = floor;
+          s.airborne = false;
+          s.airVy    = 0;
+          s.vx      *= 0.6;
+          s.vx      += rnd(-1.0, 1.0);
+          if (hasWaterNear(s.x, counterY, 80)) spawnRipple(s.x, counterY);
+        }
+        if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
+        continue;
+      }
+
+      // Sliding on counter
+      s.vx *= 0.985;
+      s.x  += s.vx;
+      s.y   = counterY - 10;
+      if (s.x < -30 || s.x > W + 30) { s.falling = true; s.fallVy = 0; }
+    }
+
+    if (orphanShards.length === 0) return; // all fell off — done
+
+    // Once all grounded orphan shards have stopped, start their melt sequence
+    const grounded = orphanShards.filter(s => !s.falling);
+    if (grounded.length > 0 && grounded.every(s => !s.airborne && Math.abs(s.vx) < 0.15)) {
+      orphanShards      = grounded;
+      orphanMeltCenterX = orphanShards.reduce((sum, s) => sum + s.x, 0) / orphanShards.length;
+      orphanMelting     = true;
+      for (const s of orphanShards) {
+        s.meltProgress    = 0;
+        s.meltWidthScale  = 1;
+        s.meltHeightScale = 1;
+        s.waterSpawned    = false;
+      }
+    }
+
+  } else {
+    // ── Melt phase ──────────────────────────────────────────────────────────
+    for (const s of orphanShards) {
+      s.meltProgress = Math.min(1, s.meltProgress + MELT_RATE);
+      const mp = s.meltProgress;
+
+      // Height shrinks faster than width — mirrors the main melt animation
+      s.meltWidthScale  = mp <= 0.5 ? lerp(1.0, 0.85, mp * 2) : lerp(0.85, 0,    (mp - 0.5) * 2);
+      s.meltHeightScale = mp <= 0.5 ? lerp(1.0, 0.40, mp * 2) : lerp(0.40, 0,    (mp - 0.5) * 2);
+      s.alpha           = 1 - (mp * 0.8);
+
+      // Spawn water particles when halfway melted
+      if (!s.waterSpawned && mp >= 0.5) {
+        const count = rndInt(2, 4);
+        for (let k = 0; k < count; k++) {
+          spawnWaterParticle(orphanMeltCenterX + rnd(-40, 40), counterY + rnd(-4, 4), rnd(14, 22));
+        }
+        s.waterSpawned = true;
+      }
+    }
+
+    // All orphan shards fully melted — begin water evaporation
+    if (orphanShards.every(s => s.meltProgress >= 1)) {
+      orphanShards  = [];
+      orphanMelting = false;
+      startWaterEvaporation();
+    }
+  }
+}
+
+// ─── spawnCubeNow — bypass respawn timer and create a cube immediately ────────
+// Called when the player taps the canvas while not holding a cube.
+// Existing shards are moved to orphanShards so they continue fading on screen.
+// Cracks, water particles, and ripples are unaffected.
+function spawnCubeNow() {
+  // Move any active shards to the orphan array (overwrites previous orphans —
+  // rapid taps discard the previous batch to keep memory bounded)
+  orphanShards  = shards.slice();
+  shards        = [];
+
+  // Preserve the melt phase if shards were already melting
+  orphanMelting = (state === 'melting');
+  if (orphanMelting) {
+    // Keep the same centroid so water particles spawn in the right spot
+    orphanMeltCenterX = meltCenterX;
+  }
+
+  // Cancel any pending respawn timer
+  spawnTimer = 0;
+
+  // Spawn the new cube and return to idle
+  ice   = mkIce();
+  state = 'idle';
+
+  // Update the on-screen cube counter
+  cubeCount++;
+  document.getElementById('cube-counter').textContent = 'Cubes: ' + cubeCount;
+}
+
 // ─── Drop / crack logic ───────────────────────────────────────────────────────
 function releaseDrop() {
   const restY = counterY - ICE_H / 2;
@@ -751,6 +894,9 @@ function clipToRect(poly, x0, y0, x1, y1) {
 function update() {
   // Water physics runs every frame so water persists across all game states
   updateWater();
+
+  // Orphan shards continue their settle → melt → water lifecycle independently
+  updateOrphanShards();
 
   // ── idle ──
   if (state === 'idle') {
@@ -1393,6 +1539,10 @@ function frame() {
   // Water renders on the patio surface, underneath ice and shards,
   // and persists across all game states (water is never cleared on spawn)
   renderWater();
+
+  // Orphan shards from a previous cube — always rendered when present so they
+  // remain visible beside or underneath the newly spawned cube
+  for (const s of orphanShards) drawShard(s);
 
   if ((state === 'idle' || state === 'held' || state === 'falling') && ice) {
     drawIce(ice);
