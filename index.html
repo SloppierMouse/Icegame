@@ -57,6 +57,14 @@ function rnd(a, b)    { return a + Math.random() * (b - a); }
 function rndInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
 function lerp(a, b, t){ return a + (b - a) * t; }
 
+// Speak "nice crack bro" via the Web Speech API each time the cube cracks.
+// Cancel any in-progress utterance first so rapid drops never queue up.
+function sayNiceCrack() {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(new SpeechSynthesisUtterance('nice crack bro'));
+}
+
 // ─── Game state ───────────────────────────────────────────────────────────────
 // 'idle'     – ice resting on counter
 // 'held'     – ice following mouse
@@ -777,6 +785,9 @@ function impactCrack(impactVy) {
     return;
   }
 
+  // Announce every crack event — cancelled before speaking so rapid drops never queue
+  sayNiceCrack();
+
   // ── Add new crack lines based on how hard the drop was ──────────────────
   let newCracks;
   if (impactVy < 12) {
@@ -956,6 +967,8 @@ function update() {
       ice.y = restY;
       // Trigger water splash if smashing into existing water
       if (hasWaterNear(smashX, counterY, 120)) spawnSplash(smashX, counterY);
+      // Announce the smash crack — cancel-before-speak so it never queues
+      sayNiceCrack();
       shards = genShards(smashX, restY, rndInt(8, 14), 2.5);
       ice    = null;
       state  = 'cracked';
